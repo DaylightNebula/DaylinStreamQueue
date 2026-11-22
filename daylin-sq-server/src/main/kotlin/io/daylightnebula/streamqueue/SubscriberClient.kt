@@ -2,6 +2,8 @@ package io.daylightnebula.streamqueue
 
 import io.daylightnebula.streamqueue.core.EventMessage
 import io.daylightnebula.streamqueue.core.HealthResponse
+import io.daylightnebula.streamqueue.core.StreamContact
+import io.daylightnebula.streamqueue.core.StreamEventResponse
 import io.daylightnebula.streamqueue.core.streamQueueJson
 import kotlinx.serialization.SerializationException
 import org.slf4j.LoggerFactory
@@ -14,7 +16,7 @@ import java.util.concurrent.ExecutionException
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
 
-/** Makes the HTTP calls to subscribers. */
+/** Makes the HTTP calls to subscribers and producers. */
 object SubscriberClient {
 
     private val logger = LoggerFactory.getLogger(SubscriberClient::class.java)
@@ -59,17 +61,53 @@ object SubscriberClient {
      *
      * @param endpoint the url of the event endpoint
      * @param event the event to send
-     * @return true if the subscriber returned a success status in time
+     * @return true if the subscriber returned 200 in time
      */
-    fun sendEvent(endpoint: String, event: EventMessage): Boolean {
-        val request = HttpRequest
-            .newBuilder(URI.create(endpoint))
-            .header("Content-Type", "application/json")
-            .POST(HttpRequest.BodyPublishers.ofString(streamQueueJson.encodeToString(event)))
-            .build()
-        val response = send(request) ?: return false
-        return response.statusCode() in 200..299
+    fun sendEvent(endpoint: String, event: EventMessage): Boolean = postEvent(endpoint, event) != null
+
+    /**
+     * Posts a stream event to an event endpoint.
+     *
+     * @param endpoint the url of the event endpoint
+     * @param event the event to send
+     * @return how to contact the subscriber, or null if the call failed, timed out or did not return 200 with a valid
+     * response
+     */
+    fun sendStreamEvent(endpoint: String, event: EventMessage): StreamEventResponse? {
+        val body = postEvent(endpoint, event) ?: return null
+        return try {
+            streamQueueJson.decodeFromString<StreamEventResponse>(body)
+        } catch (e: SerializationException) {
+            logger.warn("{} did not return a stream event response: {}", endpoint, e.message)
+            null
+        }
     }
+
+    /**
+     * Tells a producer how to contact the subscriber that received its event. This does not wait for the call, and
+     * nothing happens if it fails.
+     *
+     * @param endpoint the contact address of the producer
+     * @param contact how to contact the subscriber
+     */
+    fun contactProducer(endpoint: String, contact: StreamContact) {
+        Thread.startVirtualThread {
+            runCatching { send(postOf(endpoint, streamQueueJson.encodeToString(contact))) }
+                .onFailure { logger.warn("Failed to contact the producer at {}", endpoint, it) }
+        }
+    }
+
+    /** Returns the body of the response, or null if the event was not received. */
+    private fun postEvent(endpoint: String, event: EventMessage): String? =
+        send(postOf(endpoint, streamQueueJson.encodeToString(event)))
+            ?.takeIf { it.statusCode() == 200 }
+            ?.body()
+
+    private fun postOf(endpoint: String, body: String): HttpRequest = HttpRequest
+        .newBuilder(URI.create(endpoint))
+        .header("Content-Type", "application/json")
+        .POST(HttpRequest.BodyPublishers.ofString(body))
+        .build()
 
     // the timeout is on the future because a timeout on the request may stop counting once the headers arrive
     private fun send(request: HttpRequest): HttpResponse<String>? {

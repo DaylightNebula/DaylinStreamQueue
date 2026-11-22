@@ -3,6 +3,7 @@ package io.daylightnebula.streamqueue.client
 import com.sun.net.httpserver.HttpServer
 import io.daylightnebula.streamqueue.core.EventMessage
 import io.daylightnebula.streamqueue.core.HealthResponse
+import io.daylightnebula.streamqueue.core.StreamEventResponse
 import io.daylightnebula.streamqueue.core.Subscription
 import io.daylightnebula.streamqueue.core.streamQueueJson
 import org.junit.jupiter.api.Timeout
@@ -42,7 +43,7 @@ class StreamQueueConsumerTests {
         server = HttpServer.create(InetSocketAddress("localhost", 0), 0)
         server.executor = Executors.newVirtualThreadPerTaskExecutor()
         server.createContext("/api/") { exchange ->
-            val path = exchange.requestURI.path.removePrefix("/api")
+            val path = exchange.requestURI.toString().removePrefix("/api")
             calls += path to exchange.requestBody.readBytes().decodeToString()
             val body = id.toString().encodeToByteArray()
             exchange.sendResponseHeaders(status(path), body.size.toLong())
@@ -56,8 +57,18 @@ class StreamQueueConsumerTests {
     @AfterTest
     fun close() = server.stop(0)
 
-    private fun consumer(maxRunning: Int = 1, handler: (EventMessage) -> Unit = {}) =
-        StreamQueueConsumer(client, "test", "test-event", maxRunning = maxRunning, handler = handler)
+    private fun consumer(
+        maxRunning: Int = 1,
+        streamResponse: ((EventMessage) -> StreamEventResponse)? = null,
+        handler: (EventMessage) -> Unit = {}
+    ) = StreamQueueConsumer(
+        client,
+        "test",
+        "test-event",
+        maxRunning = maxRunning,
+        streamResponse = streamResponse,
+        handler = handler
+    )
 
     private fun subscription(): Subscription =
         streamQueueJson.decodeFromString(calls.last { it.first == "/subscribe/test-event" }.second)
@@ -69,12 +80,16 @@ class StreamQueueConsumerTests {
         return streamQueueJson.decodeFromString(response.body())
     }
 
-    private fun sendEvent(body: String = streamQueueJson.encodeToString(EventMessage(id, "test-event", "hello"))): Int {
+    private val eventBody = streamQueueJson.encodeToString(EventMessage(id, "test-event", "hello"))
+
+    private fun sendEvent(body: String = eventBody): Int = sendEventForResponse(body).statusCode()
+
+    private fun sendEventForResponse(body: String = eventBody): HttpResponse<String> {
         val request = HttpRequest
             .newBuilder(URI.create(subscription().eventEndpoint))
             .POST(HttpRequest.BodyPublishers.ofString(body))
             .build()
-        return http.send(request, HttpResponse.BodyHandlers.ofString()).statusCode()
+        return http.send(request, HttpResponse.BodyHandlers.ofString())
     }
 
     private fun waitFor(condition: () -> Boolean) {
@@ -90,12 +105,18 @@ class StreamQueueConsumerTests {
     }
 
     @Test
+    fun `client submits events with an encoded contact address`() {
+        assertEquals(id, client.submitEvent("test-event", "hello", "http://producer:3245/contact?a=b&c=é"))
+
+        val query = "contact=http%3A%2F%2Fproducer%3A3245%2Fcontact%3Fa%3Db%26c%3D%C3%A9"
+        assertEquals(listOf("/submit-event/test-event?$query" to "hello"), calls.toList())
+    }
+
+    @Test
     fun `client returns if an event is still held`() {
-        assertTrue(client.receiveEvent(id))
         assertTrue(client.completeEvent(id))
 
         status = { 404 }
-        assertFalse(client.receiveEvent(id))
         assertFalse(client.completeEvent(id))
     }
 
@@ -103,7 +124,7 @@ class StreamQueueConsumerTests {
     fun `client throws when a call fails`() {
         status = { 500 }
         assertEquals(500, assertFailsWith<StreamQueueException> { client.submitEvent("test-event", "") }.status)
-        assertEquals(500, assertFailsWith<StreamQueueException> { client.receiveEvent(id) }.status)
+        assertEquals(500, assertFailsWith<StreamQueueException> { client.completeEvent(id) }.status)
 
         server.stop(0)
         assertNull(assertFailsWith<StreamQueueException> { client.submitEvent("test-event", "") }.status)
@@ -123,7 +144,7 @@ class StreamQueueConsumerTests {
     }
 
     @Test
-    fun `consumer receives, handles and completes an event`() {
+    fun `consumer handles and completes an event`() {
         val handled = ConcurrentLinkedQueue<EventMessage>()
         consumer { handled += it }.use {
             it.start()
@@ -132,7 +153,50 @@ class StreamQueueConsumerTests {
         }
 
         assertEquals(listOf(EventMessage(id, "test-event", "hello")), handled.toList())
-        assertEquals(listOf("/recv-event/$id", "/complete-event/$id"), calls.drop(1).map { it.first })
+        assertEquals(listOf("/complete-event/$id"), calls.drop(1).map { it.first })
+    }
+
+    @Test
+    fun `consumer returns no body without a stream response`() {
+        consumer().use {
+            it.start()
+            assertEquals("", sendEventForResponse().body())
+        }
+    }
+
+    @Test
+    fun `consumer returns its stream response before the event is handled`() {
+        val finish = CountDownLatch(1)
+        val asked = ConcurrentLinkedQueue<EventMessage>()
+        val stream = { event: EventMessage ->
+            asked += event
+            StreamEventResponse("http://consumer:3244/${event.id}", "info")
+        }
+        consumer(streamResponse = stream, handler = { finish.await() }).use {
+            it.start()
+            val response = sendEventForResponse()
+            assertFalse(called("/complete-event/$id"))
+            finish.countDown()
+
+            assertEquals(200, response.statusCode())
+            assertEquals("""{"contactAddress":"http://consumer:3244/$id","extra-info":"info"}""", response.body())
+            waitFor { called("/complete-event/$id") }
+        }
+
+        assertEquals(listOf(EventMessage(id, "test-event", "hello")), asked.toList())
+    }
+
+    @Test
+    fun `consumer rejects an event when its stream response throws and stays available`() {
+        var handled = false
+        consumer(streamResponse = { error("expected by the test") }, handler = { handled = true }).use {
+            it.start()
+            assertEquals(500, sendEvent())
+            assertTrue(health().acceptingEvents)
+        }
+
+        assertFalse(handled)
+        assertFalse(called("/complete-event/$id"))
     }
 
     @Test
@@ -169,25 +233,26 @@ class StreamQueueConsumerTests {
     }
 
     @Test
-    fun `consumer does not handle an event that is no longer held`() {
-        status = { if (it.startsWith("/recv-event")) 404 else 200 }
-        var handled = false
-        consumer { handled = true }.use {
+    fun `consumer stays available when its event is no longer held`() {
+        status = { if (it.startsWith("/complete-event")) 404 else 200 }
+        consumer().use {
             it.start()
             sendEvent()
-            waitFor { called("/recv-event/$id") && health().acceptingEvents }
+            waitFor { called("/complete-event/$id") && health().acceptingEvents }
         }
-
-        assertFalse(handled)
-        assertFalse(called("/complete-event/$id"))
     }
 
     @Test
     fun `consumer does not complete an event when the handler throws and stays available`() {
-        consumer { error("expected by the test") }.use {
+        val started = CountDownLatch(1)
+        consumer {
+            started.countDown()
+            error("expected by the test")
+        }.use {
             it.start()
             sendEvent()
-            waitFor { called("/recv-event/$id") && health().acceptingEvents }
+            started.await()
+            waitFor { health().acceptingEvents }
         }
 
         assertFalse(called("/complete-event/$id"))

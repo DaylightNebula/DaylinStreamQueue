@@ -7,6 +7,7 @@ import org.springframework.web.bind.annotation.PathVariable
 import org.springframework.web.bind.annotation.PostMapping
 import org.springframework.web.bind.annotation.RequestBody
 import org.springframework.web.bind.annotation.RequestMapping
+import org.springframework.web.bind.annotation.RequestParam
 import org.springframework.web.bind.annotation.RestController
 import org.springframework.web.server.ResponseStatusException
 import kotlin.uuid.Uuid
@@ -28,16 +29,24 @@ class Service {
      *
      * @param eventType the type of the event, not found if it is not in the config
      * @param message the message of the event
+     * @param contact where the producer may be told how to contact the subscriber, a bad request if it is not a valid
+     * url or the mode of the event type is not stream
      * @return the id of the event
      */
     @PostMapping("/submit-event/{eventType}")
     fun submitEvent(
         @PathVariable("eventType") eventType: String,
-        @RequestBody message: String
+        @RequestBody message: String,
+        @RequestParam("contact", required = false) contact: String?
     ): String {
         if (eventType !in Database.stores) throw ResponseStatusException(HttpStatus.NOT_FOUND)
+        if (contact != null && Config.get().events[eventType]?.mode != Config.Mode.Stream)
+            throw ResponseStatusException(HttpStatus.BAD_REQUEST, "Only stream events can have a contact address")
+        if (contact != null && !SubscriberClient.isValidEndpoint(contact))
+            throw ResponseStatusException(HttpStatus.BAD_REQUEST, "The contact address is not a valid url")
+
         val id = Uuid.random()
-        Database.push(eventType, id, message)
+        Database.push(eventType, id, message, contact)
         Dispatcher.trigger(eventType)
         return id.toString()
     }
@@ -69,19 +78,6 @@ class Service {
             ?: throw ResponseStatusException(HttpStatus.UNPROCESSABLE_CONTENT, "The health endpoint is not active")
         Dispatcher.trigger(eventType)
         return id.toString()
-    }
-
-    /**
-     * Marks an event as received by its consumer.
-     *
-     * @param eventIdString the id of the event, a bad request if it is not an id and not found if it is not held
-     */
-    @PostMapping("/recv-event/{eventId}")
-    fun recvEvent(
-        @PathVariable("eventId") eventIdString: String
-    ) {
-        val eventId = Uuid.parseOrNull(eventIdString) ?: throw ResponseStatusException(HttpStatus.BAD_REQUEST)
-        if (!Database.markReceived(eventId)) throw ResponseStatusException(HttpStatus.NOT_FOUND)
     }
 
     /**

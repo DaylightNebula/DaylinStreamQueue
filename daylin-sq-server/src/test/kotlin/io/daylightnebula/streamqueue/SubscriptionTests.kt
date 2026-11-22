@@ -3,6 +3,8 @@ package io.daylightnebula.streamqueue
 import com.sun.net.httpserver.HttpServer
 import io.daylightnebula.streamqueue.core.EventMessage
 import io.daylightnebula.streamqueue.core.HealthResponse
+import io.daylightnebula.streamqueue.core.StreamContact
+import io.daylightnebula.streamqueue.core.StreamEventResponse
 import io.daylightnebula.streamqueue.core.Subscription
 import io.daylightnebula.streamqueue.core.streamQueueJson
 import org.junit.jupiter.api.Timeout
@@ -46,6 +48,7 @@ class SubscriptionTests {
     private lateinit var subscriptionStore: SubscriptionStore
     private lateinit var first: Database.EventStore
     private val subscribers = mutableListOf<Subscriber>()
+    private val producers = mutableListOf<Producer>()
 
     private val mockMvc = MockMvcBuilders.standaloneSetup(Service()).build()
     private val durations = Config.Durations(20.minutes, 20.minutes, 24.hours, subscriberTimeout = 500.milliseconds)
@@ -73,6 +76,7 @@ class SubscriptionTests {
     fun close() {
         Dispatcher.start(emptySet())
         subscribers.forEach { it.server.stop(0) }
+        producers.forEach { it.server.stop(0) }
         db.close()
         Database.stores = emptyMap()
         Config.config = null
@@ -85,6 +89,7 @@ class SubscriptionTests {
         @Volatile var healthBody: String? = null
         @Volatile var healthDelay = 0L
         @Volatile var eventStatus = 200
+        @Volatile var eventBody = ""
         @Volatile var eventDelay = 0L
         val healthChecks = AtomicInteger()
         val events = ConcurrentLinkedQueue<EventMessage>()
@@ -103,7 +108,9 @@ class SubscriptionTests {
                 assertEquals("POST", exchange.requestMethod)
                 events += streamQueueJson.decodeFromString<EventMessage>(exchange.requestBody.readBytes().decodeToString())
                 Thread.sleep(eventDelay)
-                exchange.sendResponseHeaders(eventStatus, -1)
+                val body = eventBody.encodeToByteArray()
+                exchange.sendResponseHeaders(eventStatus, if (body.isEmpty()) -1 else body.size.toLong())
+                exchange.responseBody.write(body)
                 exchange.close()
             }
             it.start()
@@ -120,7 +127,42 @@ class SubscriptionTests {
         fun messages() = events.map { it.message }
     }
 
+    /** A producer that records the bodies posted to its contact address. */
+    private inner class Producer {
+        @Volatile var status = 200
+        @Volatile var delay = 0L
+        val contacts = ConcurrentLinkedQueue<String>()
+
+        val server: HttpServer = HttpServer.create(InetSocketAddress("localhost", 0), 0).also {
+            it.executor = Executors.newVirtualThreadPerTaskExecutor()
+            it.createContext("/contact") { exchange ->
+                assertEquals("POST", exchange.requestMethod)
+                contacts += exchange.requestBody.readBytes().decodeToString()
+                Thread.sleep(delay)
+                exchange.sendResponseHeaders(status, -1)
+                exchange.close()
+            }
+            it.start()
+        }
+
+        val address = "http://localhost:${server.address.port}/contact"
+    }
+
     private fun subscriber() = Subscriber().also { subscribers += it }
+
+    private fun producer() = Producer().also { producers += it }
+
+    /** A subscriber to the first event type, which becomes a stream, that responds with the given body. */
+    private fun streamSubscriber(body: String): Subscriber {
+        val events = mapOf("first" to Config.EventDescription(Config.Mode.Stream, emptyList()))
+        Config.config = Config(events = events, durations = durations)
+        return subscriber().also {
+            it.eventBody = body
+            it.subscribe()
+        }
+    }
+
+    private fun streamSubscriber(response: StreamEventResponse) = streamSubscriber(streamQueueJson.encodeToString(response))
 
     private fun post(subscription: String, type: String = "first"): ResultActionsDsl =
         mockMvc.post("/api/subscribe/$type") {
@@ -386,6 +428,169 @@ class SubscriptionTests {
         assertEquals(emptyList(), ids())
         assertEquals(listOf("a", "b"), List(2) { first.borrow(durations)?.message })
         assertNull(first.borrow(durations))
+    }
+
+    @Test
+    fun `an event is received when the event endpoint returns 200`() {
+        val subscriber = subscriber().also { it.subscribe() }
+        push("a")
+
+        Dispatcher.dispatch("first")
+        Thread.sleep(10)
+
+        assertNull(first.borrow(durations.copy(maxNoReceiveDuration = 1.milliseconds)))
+        assertEquals("a", first.borrow(durations.copy(maxProcessingDuration = 1.milliseconds))?.message)
+        assertEquals(listOf("a"), subscriber.messages())
+    }
+
+    @Test
+    fun `an event is not received when the event endpoint returns another success status`() {
+        listOf(201, 202, 204).forEach { status ->
+            subscriber().also { it.subscribe() }.eventStatus = status
+            push("$status")
+
+            Dispatcher.dispatch("first")
+
+            assertEquals(emptyList(), ids())
+            assertEquals("$status", first.borrow(durations)?.message)
+        }
+    }
+
+    @Test
+    fun `an event completed before its endpoint responds is not sent again`() {
+        val subscriber = subscriber().also { it.subscribe() }
+        subscriber.eventDelay = 200
+        push("a")
+        val completing = Thread.startVirtualThread {
+            waitFor("should be sent") { subscriber.events.isNotEmpty() }
+            assertTrue(Database.pop(subscriber.events.single().id))
+        }
+
+        Dispatcher.dispatch("first")
+        completing.join()
+
+        assertEquals(listOf("a"), subscriber.messages())
+        assertEquals(1, ids().size)
+        assertNull(first.borrow(durations.copy(maxNoReceiveDuration = 0.milliseconds, maxProcessingDuration = 0.milliseconds)))
+    }
+
+    @Test
+    fun `the producer of a stream event is told how to contact its subscriber`() {
+        val producer = producer()
+        val subscriber = streamSubscriber(StreamEventResponse("tcp://subscriber:1234", "héllo"))
+        Database.push("first", Uuid.random(), "a \"日本\"", producer.address)
+
+        Dispatcher.dispatch("first")
+
+        waitFor("should be contacted") { producer.contacts.isNotEmpty() }
+        val expected = StreamContact("a \"日本\"", "tcp://subscriber:1234", "héllo")
+        assertEquals(expected, streamQueueJson.decodeFromString(producer.contacts.single()))
+        assertEquals(1, subscriber.events.size)
+    }
+
+    @Test
+    fun `stream bodies use the documented field names`() {
+        val producer = producer()
+        streamSubscriber("""{"contactAddress":"address","extra-info":"info"}""")
+        Database.push("first", Uuid.random(), "a", producer.address)
+
+        Dispatcher.dispatch("first")
+
+        waitFor("should be contacted") { producer.contacts.isNotEmpty() }
+        assertEquals("""{"message":"a","contact":"address","extra-info":"info"}""", producer.contacts.single())
+    }
+
+    @Test
+    fun `extra info is optional`() {
+        val producer = producer()
+        streamSubscriber("""{"contactAddress":"address"}""")
+        Database.push("first", Uuid.random(), "a", producer.address)
+
+        Dispatcher.dispatch("first")
+
+        waitFor("should be contacted") { producer.contacts.isNotEmpty() }
+        assertEquals("""{"message":"a","contact":"address"}""", producer.contacts.single())
+    }
+
+    @Test
+    fun `a submitted contact address is called`() {
+        val producer = producer()
+        streamSubscriber(StreamEventResponse("address"))
+        Dispatcher.start(Database.stores.keys)
+
+        mockMvc.post("/api/submit-event/first") {
+            content = "hello"
+            queryParam("contact", producer.address)
+        }.andExpect { status { isOk() } }
+
+        waitFor("should be contacted") { producer.contacts.isNotEmpty() }
+        assertEquals(StreamContact("hello", "address"), streamQueueJson.decodeFromString(producer.contacts.single()))
+    }
+
+    @Test
+    fun `a stream event is received without a contact address`() {
+        val subscriber = streamSubscriber(StreamEventResponse("address"))
+        push("a")
+
+        Dispatcher.dispatch("first")
+        Thread.sleep(10)
+
+        assertEquals(listOf("a"), subscriber.messages())
+        assertNull(first.borrow(durations.copy(maxNoReceiveDuration = 1.milliseconds)))
+        assertEquals(1, ids().size)
+    }
+
+    @Test
+    fun `a stream event without a valid response is a failed event`() {
+        val producer = producer()
+        val bodies = listOf("", "not json", "{}", "[]", """{"extra-info":"info"}""", """{"contactAddress":null}""")
+        Database.push("first", Uuid.random(), "a", producer.address)
+        bodies.forEach { body ->
+            val subscriber = streamSubscriber(body)
+
+            Dispatcher.dispatch("first")
+
+            assertEquals(listOf("a"), subscriber.messages(), body)
+            assertEquals(emptyList(), ids(), body)
+        }
+        assertEquals("a", first.borrow(durations)?.message)
+        Thread.sleep(100)
+        assertTrue(producer.contacts.isEmpty())
+    }
+
+    @Test
+    fun `a failed stream event contacts its producer once it is received by another subscriber`() {
+        val producer = producer()
+        val failing = streamSubscriber(StreamEventResponse("failing")).also { it.eventStatus = 500 }
+        streamSubscriber(StreamEventResponse("working"))
+        Database.push("first", Uuid.random(), "a", producer.address)
+
+        Dispatcher.dispatch("first")
+
+        waitFor("should be contacted") { producer.contacts.isNotEmpty() }
+        Thread.sleep(100)
+        assertEquals(StreamContact("a", "working"), streamQueueJson.decodeFromString(producer.contacts.single()))
+        assertEquals(listOf("a"), failing.messages())
+    }
+
+    @Test
+    fun `nothing happens when a producer does not accept its contact`() {
+        val changes = listOf<Producer.() -> Unit>({ status = 500 }, { delay = 2_000 }, { server.stop(0) })
+        val subscriber = streamSubscriber(StreamEventResponse("address"))
+        changes.forEach { change ->
+            val producer = producer().apply(change)
+            Database.push("first", Uuid.random(), "a", producer.address)
+        }
+
+        val start = TimeSource.Monotonic.markNow()
+        Dispatcher.dispatch("first")
+        assertTrue(start.elapsedNow() < 2.seconds, "should not wait for producers")
+        Thread.sleep(1_000)
+
+        assertEquals(listOf("a", "a", "a"), subscriber.messages())
+        assertEquals(1, ids().size)
+        assertNull(first.borrow(durations.copy(maxNoReceiveDuration = 1.milliseconds)))
+        subscriber.events.forEach { assertTrue(Database.pop(it.id)) }
     }
 
     @Test

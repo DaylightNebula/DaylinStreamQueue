@@ -1,9 +1,11 @@
 package io.daylightnebula.streamqueue.client
 
+import io.daylightnebula.streamqueue.core.StreamContact
 import io.daylightnebula.streamqueue.core.Subscription
 import io.daylightnebula.streamqueue.core.streamQueueJson
 import java.io.IOException
 import java.net.URI
+import java.net.URLEncoder
 import java.net.http.HttpClient
 import java.net.http.HttpRequest
 import java.net.http.HttpResponse
@@ -26,7 +28,7 @@ class StreamQueueException(
 /**
  * Calls a daylin-sq server.
  *
- * @param serverAddress the address of the server, such as http://localhost:8080
+ * @param serverAddress the address of the server, such as http://localhost:5000
  */
 class StreamQueueClient(serverAddress: String) {
 
@@ -42,11 +44,15 @@ class StreamQueueClient(serverAddress: String) {
      *
      * @param eventType the type of the event
      * @param message the message of the event
+     * @param contact url called with a POST of a [StreamContact] once a subscriber receives the event, or null to not be
+     * called. Only allowed if the mode of the event type is stream
      * @return the id of the event
      * @throws StreamQueueException if the call fails
      */
-    fun submitEvent(eventType: String, message: String): Uuid =
-        Uuid.parse(post("/submit-event/$eventType", message, "text/plain; charset=utf-8"))
+    fun submitEvent(eventType: String, message: String, contact: String? = null): Uuid {
+        val query = contact?.let { "?contact=" + URLEncoder.encode(it, Charsets.UTF_8) }.orEmpty()
+        return Uuid.parse(post("/submit-event/$eventType$query", message, "text/plain; charset=utf-8"))
+    }
 
     /**
      * Subscribes to an event type. The subscriber must be fully set up before calling this, the server calls its health
@@ -62,25 +68,14 @@ class StreamQueueClient(serverAddress: String) {
     }
 
     /**
-     * Marks an event as received, so that it is not sent to another subscriber while it is being processed.
-     *
-     * @param id the id of the event
-     * @return false if the event is no longer held, in which case it should not be processed
-     * @throws StreamQueueException if the call fails
-     */
-    fun receiveEvent(id: Uuid): Boolean = postFound("/recv-event/$id")
-
-    /**
      * Marks an event as completed, removing it from the server.
      *
      * @param id the id of the event
      * @return false if the event is no longer held
      * @throws StreamQueueException if the call fails
      */
-    fun completeEvent(id: Uuid): Boolean = postFound("/complete-event/$id")
-
-    private fun postFound(path: String): Boolean = try {
-        post(path, "", "text/plain")
+    fun completeEvent(id: Uuid): Boolean = try {
+        post("/complete-event/$id", "", "text/plain")
         true
     } catch (e: StreamQueueException) {
         if (e.status != 404) throw e

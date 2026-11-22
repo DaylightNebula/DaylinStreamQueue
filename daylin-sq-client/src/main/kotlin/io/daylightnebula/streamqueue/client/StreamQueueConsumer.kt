@@ -4,6 +4,7 @@ import com.sun.net.httpserver.HttpExchange
 import com.sun.net.httpserver.HttpServer
 import io.daylightnebula.streamqueue.core.EventMessage
 import io.daylightnebula.streamqueue.core.HealthResponse
+import io.daylightnebula.streamqueue.core.StreamEventResponse
 import io.daylightnebula.streamqueue.core.Subscription
 import io.daylightnebula.streamqueue.core.streamQueueJson
 import kotlinx.serialization.SerializationException
@@ -21,6 +22,9 @@ import kotlin.uuid.Uuid
  * @param port the port to host the endpoints on, or 0 to use any free port
  * @param publicAddress finds the address that the server can reach this consumer at, from the port that is used
  * @param maxRunning how many events to consume at once before responding as busy
+ * @param streamResponse finds how the producer may contact this consumer about an event, called before the handler and
+ * must return within 5 seconds. Required if the mode of the event type is stream, if this throws then the event is
+ * rejected and the server removes the subscription
  * @param handler consumes an event, which is completed when this returns. If this throws, then the event is sent again
  * after the server's max processing duration
  */
@@ -31,6 +35,7 @@ class StreamQueueConsumer(
     private val port: Int = 0,
     private val publicAddress: (port: Int) -> String = { "http://localhost:$it" },
     private val maxRunning: Int = 1,
+    private val streamResponse: ((EventMessage) -> StreamEventResponse)? = null,
     private val handler: (EventMessage) -> Unit
 ) : AutoCloseable {
 
@@ -102,21 +107,29 @@ class StreamQueueConsumer(
             return exchange.respond(400)
         }
 
+        val response = try {
+            streamResponse?.invoke(event)
+        } catch (e: Exception) {
+            logger.log(System.Logger.Level.ERROR, "Failed to find the stream response of event ${event.id}", e)
+            return exchange.respond(500)
+        }
+
         // count before responding, so that the server's next health check sees it
         running.incrementAndGet()
         executor.submit { consume(event) }
-        exchange.respond(200)
+        exchange.responseHeaders["Content-Type"] = "application/json"
+        exchange.respond(200, response?.let { streamQueueJson.encodeToString(it) }.orEmpty())
     }
 
     private fun consume(event: EventMessage) {
         try {
-            val received = try {
-                client.receiveEvent(event.id).also { if (it) handler(event) }
+            try {
+                handler(event)
             } finally {
                 // before completing, as that makes the server check if this can take another event
                 running.decrementAndGet()
             }
-            if (!received || !client.completeEvent(event.id))
+            if (!client.completeEvent(event.id))
                 logger.log(System.Logger.Level.WARNING, "Event ${event.id} is no longer held by this consumer")
         } catch (e: Exception) {
             logger.log(System.Logger.Level.ERROR, "Failed to consume event ${event.id}", e)

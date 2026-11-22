@@ -80,21 +80,13 @@ data class Config(
          */
         @Serializable @SerialName("Http")
         class Http(val address: String): Consumer()
-
-        /**
-         * A consumer that is run as a command.
-         *
-         * @param command the command to run
-         */
-        @Serializable @SerialName("Command")
-        class Command(val command: String): Consumer()
     }
 
     /**
      * The time limits used by the server.
      *
-     * @param maxNoReceiveDuration once an event is sent to a consumer, how long should we wait for them to acknowledge
-     * before unborrowing the event
+     * @param maxNoReceiveDuration once an event is sent to a consumer, how long should we wait for them to receive it
+     * by returning 200 before unborrowing the event
      * @param maxProcessingDuration once an event is received by a consumer, how long should we wait for them to
      * acknowledge they have completed the event
      * @param maxTimeInQueue what is the max time an event may exist in the database

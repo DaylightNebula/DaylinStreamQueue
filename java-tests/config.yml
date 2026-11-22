@@ -2,3 +2,6 @@ events:
   test-event:
     mode: Simple
     consumers: []
+  alphabet:
+    mode: Stream
+    consumers: []

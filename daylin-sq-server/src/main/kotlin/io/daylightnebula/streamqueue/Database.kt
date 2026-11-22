@@ -30,6 +30,8 @@ object Database {
     private const val RECEIVED: Byte = 2
     private const val ID_OFFSET = 8
     private const val RECV_TIME_OFFSET = 24
+    private const val CONTACT_LENGTH_OFFSET = 32
+    private const val CONTACT_OFFSET = 36
 
     private const val CLEANUP_BATCH = 1_000
     private val cleanupInterval = 1.minutes
@@ -47,18 +49,20 @@ object Database {
      * @param id the id of the event
      * @param recvTime when the event was pushed
      * @param message the message of the event
+     * @param contact where the producer of the event may be contacted, or null if it did not provide an address
      */
     data class BorrowedEvent(
         val seq: Long,
         val takenAt: Long,
         val id: Uuid,
         val recvTime: Instant,
-        val message: String
+        val message: String,
+        val contact: String? = null
     )
 
     /**
-     * One queue, kept in its own column family. Values are takenAt, id, recvTime, then the message. Received events
-     * have receivedAt in front of that.
+     * One queue, kept in its own column family. Values are takenAt, id, recvTime, the length of the contact address (0
+     * if there is none), the contact address, then the message. Received events have receivedAt in front of that.
      *
      * @param db the database to keep the queue in
      * @param family the column family of the queue
@@ -116,13 +120,14 @@ object Database {
          * Adds events to the back of the queue in one write.
          *
          * @param messages the id and message of each event
+         * @param contact where the producer of the events may be contacted, if it provided an address
          */
-        fun push(messages: List<Pair<Uuid, String>>) {
+        fun push(messages: List<Pair<Uuid, String>>, contact: String? = null) {
             lock.withLock {
                 val now = Clock.System.now().toEpochMilliseconds()
                 WriteBatch().use { batch ->
                     messages.forEachIndexed { i, (id, message) ->
-                        batch.put(family, key(READY, tail + i), encode(id, now, message))
+                        batch.put(family, key(READY, tail + i), encode(id, now, message, contact))
                     }
                     db.write(writeOptions, batch)
                 }
@@ -203,14 +208,6 @@ object Database {
          * @return false if it was removed or has since been borrowed again
          */
         fun markReceived(borrowed: BorrowedEvent): Boolean = lock.withLock { markReceived(find(borrowed)) }
-
-        /**
-         * Marks a borrowed event as received, but cannot tell if it was borrowed again.
-         *
-         * @param id the id of the event to mark
-         * @return false if it is not borrowed
-         */
-        fun markReceived(id: Uuid): Boolean = lock.withLock { markReceived(heldById[id]) }
 
         private fun markReceived(current: Held?): Boolean {
             if (current == null) return false
@@ -333,24 +330,29 @@ object Database {
 
         private fun seqOf(key: ByteArray) = ByteBuffer.wrap(key).getLong(1)
 
-        private fun encode(id: Uuid, recvTime: Long, message: String): ByteArray {
+        private fun encode(id: Uuid, recvTime: Long, message: String, contact: String?): ByteArray {
             val bytes = message.encodeToByteArray()
-            return ByteBuffer.allocate(32 + bytes.size)
+            val contactBytes = contact.orEmpty().encodeToByteArray()
+            return ByteBuffer.allocate(CONTACT_OFFSET + contactBytes.size + bytes.size)
                 .putLong(0)
                 .putUuid(id)
                 .putLong(recvTime)
+                .putInt(contactBytes.size)
+                .put(contactBytes)
                 .put(bytes)
                 .array()
         }
 
         private fun decode(seq: Long, value: ByteArray): BorrowedEvent {
             val buffer = ByteBuffer.wrap(value)
+            val messageOffset = CONTACT_OFFSET + buffer.getInt(CONTACT_LENGTH_OFFSET)
             return BorrowedEvent(
                 seq = seq,
                 takenAt = buffer.getLong(),
                 id = buffer.getUuid(),
                 recvTime = Instant.fromEpochMilliseconds(buffer.getLong()),
-                message = value.decodeToString(startIndex = 32)
+                message = value.decodeToString(startIndex = messageOffset),
+                contact = value.decodeToString(CONTACT_OFFSET, messageOffset).ifEmpty { null }
             )
         }
     }
@@ -397,8 +399,10 @@ object Database {
      * @param event the event type
      * @param id the id of the event
      * @param message the message of the event
+     * @param contact where the producer of the event may be contacted, if it provided an address
      */
-    fun push(event: String, id: Uuid, message: String) = pushAll(event, listOf(id to message))
+    fun push(event: String, id: Uuid, message: String, contact: String? = null) =
+        stores.getValue(event).push(listOf(id to message), contact)
 
     /**
      * Adds many events to the back of the queue in one write.
@@ -435,14 +439,6 @@ object Database {
      * @return false if it was already removed or has since been borrowed again
      */
     fun pop(event: String, borrowed: BorrowedEvent): Boolean = stores.getValue(event).pop(borrowed)
-
-    /**
-     * Like the other markReceived, but finds the borrowed event by id and so cannot tell if it was borrowed again.
-     *
-     * @param id the id of the event to mark
-     * @return false if it is not borrowed
-     */
-    fun markReceived(id: Uuid): Boolean = stores.values.any { it.markReceived(id) }
 
     /**
      * Like the other pop, but finds the borrowed event by id and so cannot tell if it was borrowed again.

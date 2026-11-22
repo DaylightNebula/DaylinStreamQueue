@@ -1,6 +1,7 @@
 package io.daylightnebula.streamqueue
 
 import io.daylightnebula.streamqueue.core.EventMessage
+import io.daylightnebula.streamqueue.core.StreamContact
 import org.slf4j.LoggerFactory
 import java.util.concurrent.Semaphore
 import kotlin.concurrent.thread
@@ -45,7 +46,8 @@ object Dispatcher {
 
     /**
      * Sends waiting events to subscribers until there are no more events or no subscriber can take one. An event that
-     * fails to send goes back to the front of the queue and its subscription is removed.
+     * is sent is marked as received, and if its mode is stream then its producer is told how to contact the subscriber.
+     * An event that fails to send goes back to the front of the queue and its subscription is removed.
      *
      * @param eventType the event type to send
      */
@@ -57,11 +59,28 @@ object Dispatcher {
             val subscriber = Subscriptions.nextAvailable(eventType) ?: return
             val event = store.borrow(durations) ?: return
 
-            val message = EventMessage(event.id, eventType, event.message)
-            if (!SubscriberClient.sendEvent(subscriber.subscription.eventEndpoint, message)) {
+            if (!send(eventType, event, subscriber.subscription.eventEndpoint)) {
                 store.giveBack(event)
                 Subscriptions.remove(subscriber)
             }
         }
+    }
+
+    /** Returns false if the subscriber did not receive the event. */
+    private fun send(eventType: String, event: Database.BorrowedEvent, endpoint: String): Boolean {
+        val message = EventMessage(event.id, eventType, event.message)
+        if (Config.get().events[eventType]?.mode != Config.Mode.Stream) {
+            if (!SubscriberClient.sendEvent(endpoint, message)) return false
+            Database.markReceived(eventType, event)
+            return true
+        }
+
+        val response = SubscriberClient.sendStreamEvent(endpoint, message) ?: return false
+        Database.markReceived(eventType, event)
+        event.contact?.let {
+            val contact = StreamContact(event.message, response.contactAddress, response.extraInfo)
+            SubscriberClient.contactProducer(it, contact)
+        }
+        return true
     }
 }

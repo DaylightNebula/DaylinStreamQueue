@@ -4,3 +4,6 @@ events:
     consumers:
       - type: Http
         address: "http://127.0.0.1:3242/execute-event"
+  alphabet:
+    mode: Stream
+    consumers: []

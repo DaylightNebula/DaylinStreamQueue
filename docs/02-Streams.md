@@ -12,6 +12,27 @@ A consumer may include in there response containing the contact address with ano
 field should be copied into the post endpoint call to the producer with a field of the same name.  If the producer fails
 to accept the post endpoint call, nothing should occur, any response they give should just be ignored.
 
+```kotlin
+data class StreamEventResponse {
+    contactAddress: String
+    extraInfo: String
+}
+```
+
+### Submitting an Event with a Contact Address
+The "/api/submit-event/{eventType}" endpoint takes the producer's contact address as an optional query parameter named
+"contact".  The request body is still only the raw message, so existing producers do not need to change.  The address
+must be url encoded and is saved with the event, so that it is kept through retries and restarts.
+
+```
+POST /api/submit-event/alphabet?contact=http%3A%2F%2Fproducer%3A3243%2Fcontact
+
+<the raw message>
+```
+
+A bad request is returned if the contact address is not a valid http or https url, or if one is given for an event type
+that is not marked as stream.
+
 ## Testing
 Update the java test consumers and producers to stream the ABC's in two letter increments back to the producer with a
 new event type named "alphabet".

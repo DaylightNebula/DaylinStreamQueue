@@ -27,8 +27,20 @@ Subscribers are sent events over HTTP. To subscribe, post a subscription to `/ap
 - A subscription is removed when a health check fails or is not active, or when an event fails to send. Subscribe again
   to rejoin. A failed event goes back to the front of the queue.
 - Only one subscription to an event type can use a health endpoint, the oldest is ejected.
-- Events are posted to the event endpoint as `{"id": "...", "eventType": "...", "message": "..."}`. Respond within 5
-  seconds, then post to `/api/recv-event/{id}` and, once finished, to `/api/complete-event/{id}`.
+- Events are posted to the event endpoint as `{"id": "...", "eventType": "...", "message": "..."}`. Return a 200 within 5
+  seconds to mark the event as received, then post to `/api/complete-event/{id}` once finished.
+
+### Streams
+When the mode of an event type is `Stream`, its producer and subscriber can talk to each other while it is processed:
+
+1. The producer posts the event to `/api/submit-event/{eventType}?contact=...`, where `contact` is an optional url encoded
+   address that it can be called on. The request body is the raw message.
+2. The subscriber must return `{"contactAddress": "...", "extra-info": "..."}` from its event endpoint, where `extra-info`
+   is optional. Anything else is treated as a failed event.
+3. If the producer gave an address, it is posted `{"message": "...", "contact": "...", "extra-info": "..."}`, where
+   `contact` is the address from the subscriber. Its response is ignored, and nothing happens if the call fails.
+
+How they then talk is up to them, and the producer does not have to connect.
 
 ## Projects
 Each folder is its own Gradle project, and includes the ones it needs as composite builds.
@@ -48,7 +60,8 @@ gradle -p daylin-sq-server bootRun
 docker build -f daylin-sq-server/Dockerfile .
 ```
 
-To run the test network, which should print "Hello from the producer" and 6.5:
+To run the test network, which should print "Hello from the producer" and 6.5, then stream the alphabet from the consumer
+to the producer two letters at a time:
 
 ```
 docker compose -f java-tests/docker-compose.yml up --build
@@ -56,9 +69,20 @@ docker compose -f java-tests/docker-compose.yml up --build
 
 ## Example
 ```kotlin
-val client = StreamQueueClient("http://localhost:8080")
+val client = StreamQueueClient("http://localhost:5000")
 
 StreamQueueConsumer(client, "my-consumer", "test-event") { event -> println(event.message) }.start()
 
 client.submitEvent("test-event", "hello")
+```
+
+With a stream event type:
+
+```kotlin
+StreamQueueConsumer(
+    client, "my-consumer", "alphabet",
+    streamResponse = { event -> StreamEventResponse("http://my-consumer:3244/${event.id}", "two letters on each line") }
+) { event -> println(event.message) }.start()
+
+client.submitEvent("alphabet", "hello", contact = "http://my-producer:3245/contact")
 ```

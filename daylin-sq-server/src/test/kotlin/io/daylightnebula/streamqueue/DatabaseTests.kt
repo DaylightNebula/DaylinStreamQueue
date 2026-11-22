@@ -100,6 +100,49 @@ class DatabaseTests {
     }
 
     @Test
+    fun `an event has no contact address unless it is pushed with one`() {
+        first.pushOne()
+        first.push(listOf(Uuid.random() to "hello"), "http://producer/contact")
+
+        assertNull(assertNotNull(first.borrow(notExpired)).contact)
+        val event = assertNotNull(first.borrow(notExpired))
+        assertEquals("http://producer/contact", event.contact)
+        assertEquals("hello", event.message)
+    }
+
+    @Test
+    fun `contact addresses and messages keep empty and non ascii text`() {
+        val messages = listOf("", "héllo", "日本", "😀")
+        messages.forEach { first.push(listOf(Uuid.random() to it), "http://producer/日本?a=é") }
+
+        repeat(messages.size) {
+            val event = assertNotNull(first.borrow(notExpired))
+            assertEquals(messages[it], event.message)
+            assertEquals("http://producer/日本?a=é", event.contact)
+        }
+    }
+
+    @Test
+    fun `a contact address is kept when an event is given back, received, expired or reloaded`() {
+        first.push(listOf(Uuid.random() to "hello"), "http://producer/contact")
+        fun check(event: Database.BorrowedEvent?) {
+            assertEquals("http://producer/contact", assertNotNull(event).contact)
+            assertEquals("hello", event.message)
+        }
+
+        reopen()
+        val event = assertNotNull(first.borrow(notExpired))
+        check(event)
+        first.giveBack(event)
+        val again = assertNotNull(first.borrow(notExpired))
+        check(again)
+        first.markReceived(again)
+        reopen()
+        waitUntilExpired()
+        check(first.borrow(processingExpired))
+    }
+
+    @Test
     fun `events are borrowed in the order they were pushed`() {
         val ids = List(300) { first.pushOne() }
 
@@ -487,28 +530,27 @@ class DatabaseTests {
     }
 
     @Test
-    fun `a borrowed event can be received and popped by id`() {
+    fun `a received event can be popped by id`() {
         first.pushOne()
         val id = first.pushOne()
         val other = assertNotNull(first.borrow(notExpired))
         val event = assertNotNull(first.borrow(notExpired))
         assertEquals(id, event.id)
 
-        assertTrue(first.markReceived(id))
+        assertTrue(first.markReceived(event))
         waitUntilExpired()
         assertEquals(other.id, first.borrow(receiveExpired)?.id)
         assertNull(first.borrow(notExpired.copy(maxNoReceiveDuration = 1.hours)))
         assertTrue(first.pop(id))
         assertFalse(first.pop(id))
-        assertFalse(first.markReceived(id))
+        assertFalse(first.markReceived(event))
         assertFalse(first.pop(event))
     }
 
     @Test
-    fun `an event that is not borrowed cannot be received or popped by id`() {
+    fun `an event that is not borrowed cannot be popped by id`() {
         val id = first.pushOne()
 
-        assertFalse(first.markReceived(id))
         assertFalse(first.pop(id))
         assertFalse(first.pop(Uuid.random()))
         assertEquals(id, first.borrow(notExpired)?.id)
@@ -517,12 +559,12 @@ class DatabaseTests {
     @Test
     fun `borrowed and received events can be found by id after a restart`() {
         val ids = List(2) { first.pushOne() }
-        repeat(2) { first.borrow(notExpired) }
-        first.markReceived(ids[0])
+        val events = List(2) { assertNotNull(first.borrow(notExpired)) }
+        first.markReceived(events[0])
         reopen()
 
         assertTrue(first.pop(ids[0]))
-        assertTrue(first.markReceived(ids[1]))
+        assertTrue(first.markReceived(events[1]))
         assertTrue(first.pop(ids[1]))
     }
 
@@ -533,7 +575,6 @@ class DatabaseTests {
         waitUntilExpired()
         val current = assertNotNull(first.borrow(expired))
 
-        assertTrue(first.markReceived(id))
         assertTrue(first.pop(id))
         assertFalse(first.pop(current))
     }
@@ -545,7 +586,6 @@ class DatabaseTests {
         waitUntilExpired()
         first.removeOld(expired.copy(maxTimeInQueue = 1.milliseconds))
 
-        assertFalse(first.markReceived(id))
         assertFalse(first.pop(id))
     }
 
@@ -557,11 +597,10 @@ class DatabaseTests {
         second.borrow(notExpired)
 
         ids.forEach {
-            assertTrue(Database.markReceived(it))
             assertTrue(Database.pop(it))
             assertFalse(Database.pop(it))
         }
-        assertFalse(Database.markReceived(Uuid.random()))
+        assertFalse(Database.pop(Uuid.random()))
     }
 
     @Test
@@ -609,7 +648,7 @@ class DatabaseTests {
         assertFalse(first.giveBack(event))
         assertFalse(first.pop(event))
         assertFalse(first.pop(id))
-        assertFalse(first.markReceived(id))
+        assertFalse(first.markReceived(event))
     }
 
     @Test
