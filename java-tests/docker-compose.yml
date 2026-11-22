@@ -1,0 +1,42 @@
+name: daylin-sq-tests
+
+services:
+  server:
+    build:
+      context: ..
+      dockerfile: daylin-sq-server/Dockerfile
+    volumes:
+      - ./config.yml:/config.yml:ro
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/localhost/8080"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  consumer:
+    build:
+      context: ..
+      dockerfile: java-tests/Dockerfile
+      args:
+        PROJECT: consumer
+    environment:
+      SERVER_ADDRESS: http://server:8080
+      PUBLIC_HOST: consumer
+    depends_on:
+      server:
+        condition: service_healthy
+
+  producer:
+    build:
+      context: ..
+      dockerfile: java-tests/Dockerfile
+      args:
+        PROJECT: producer
+    environment:
+      SERVER_ADDRESS: http://server:8080
+      START_DELAY_SECONDS: 5
+    depends_on:
+      server:
+        condition: service_healthy
+      consumer:
+        condition: service_started
