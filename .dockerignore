@@ -5,3 +5,5 @@
 **/.gradle
 **/.kotlin
 **/build
+**/target
+**/node_modules

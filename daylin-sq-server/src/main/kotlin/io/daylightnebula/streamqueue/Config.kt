@@ -19,12 +19,14 @@ import kotlin.uuid.Uuid
  * @param events describes each event type by name
  * @param id identifies the server
  * @param durations the time limits used by the server
+ * @param corsOrigins the origins of the web pages that may call the server from a browser, or * for any of them
  */
 @Serializable
 data class Config(
     val events: Map<String, EventDescription>,
     val id: Uuid = Uuid.random(),
-    val durations: Durations = Durations()
+    val durations: Durations = Durations(),
+    val corsOrigins: List<String> = emptyList()
 ) {
     companion object {
         var config: Config? = null

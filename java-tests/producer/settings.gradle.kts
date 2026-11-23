@@ -1,3 +1,3 @@
 rootProject.name = "producer"
 
-includeBuild("../../daylin-sq-client")
+includeBuild("../../daylin-sq-client-java")

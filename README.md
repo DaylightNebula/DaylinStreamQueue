@@ -4,12 +4,35 @@ then establish a webstream link that the two can stream data over.  This allows 
 stream data and talk to some kind of interactive services consuming the event.  This is nice for things like a build
 service for remotely building projects where you need to stream logs, results, and keyboard events to and from the user.
 
-## Architecture
-This architecture of this project is similar to that of a more complex version of RabbitMQ.  For this, messages are
-described via a config.yml file that determines what the types of events that can be sent, how and where they are sent,
-and what mode the event is handled with.
+## What it does
+Producers submit events to the server over HTTP, and the server queues and sends each one to a consumer that is free.
+The architecture is similar to that of a more complex version of RabbitMQ:
 
-Subscribers are sent events over HTTP. To subscribe, post a subscription to `/api/subscribe/{eventType}`:
+- Event types are described in a `config.yml` file, which gives each one a mode.
+- Events are kept in a database until they are completed, so they survive restarts. An event that its consumer does not
+  finish in time is sent again.
+- Consumers subscribe to an event type, and its events are sent to the free ones in turn.
+- A `Simple` event is sent to a consumer and that is all.
+- A `Stream` event also lets its producer and consumer talk to each other while it is processed. The server passes on how
+  to contact the consumer, and how they then talk is up to them.
+
+### Projects
+Each folder is its own project.
+
+- `daylin-sq-server`: The server, run it from its folder so that it finds `config.yml`
+- `daylin-sq-client-java`: Library for submitting and consuming events from Java and Kotlin
+- `daylin-sq-client-rust`: Library for submitting and consuming events from Rust
+- `daylin-sq-client-js`: Library for submitting and consuming events from JavaScript and TypeScript
+- `daylin-sq-core`: Classes shared by the server and the Java client
+- `java-tests`: A test consumer and producer
+- `examples`: A full example of each client, each is one file
+
+### HTTP API
+The clients do all of this, so it is only needed to use the server without one.
+
+To submit an event, post its raw message to `/api/submit-event/{eventType}`, which returns the id of the event.
+
+To subscribe, post a subscription to `/api/subscribe/{eventType}`, which returns the id of the subscription:
 
 ```json
 {
@@ -30,34 +53,45 @@ Subscribers are sent events over HTTP. To subscribe, post a subscription to `/ap
 - Events are posted to the event endpoint as `{"id": "...", "eventType": "...", "message": "..."}`. Return a 200 within 5
   seconds to mark the event as received, then post to `/api/complete-event/{id}` once finished.
 
-### Streams
-When the mode of an event type is `Stream`, its producer and subscriber can talk to each other while it is processed:
+When the mode of an event type is `Stream`:
 
 1. The producer posts the event to `/api/submit-event/{eventType}?contact=...`, where `contact` is an optional url encoded
-   address that it can be called on. The request body is the raw message.
+   address that it can be called on.
 2. The subscriber must return `{"contactAddress": "...", "extra-info": "..."}` from its event endpoint, where `extra-info`
    is optional. Anything else is treated as a failed event.
 3. If the producer gave an address, it is posted `{"message": "...", "contact": "...", "extra-info": "..."}`, where
    `contact` is the address from the subscriber. Its response is ignored, and nothing happens if the call fails.
 
-How they then talk is up to them, and the producer does not have to connect.
-
-## Projects
-Each folder is its own Gradle project, and includes the ones it needs as composite builds.
-
-- `daylin-sq-core`: Classes shared by the server and client
-- `daylin-sq-server`: The server, run it from its folder so that it finds `config.yml`
-- `daylin-sq-client`: Library for submitting and consuming events
-- `java-tests`: A test consumer and producer
+The producer does not have to connect.
 
 ## Build
+### Server
 Java 25 and Gradle 9.9 are required.
 
 ```
 gradle -p daylin-sq-server test
-gradle -p daylin-sq-client test
 gradle -p daylin-sq-server bootRun
 docker build -f daylin-sq-server/Dockerfile .
+```
+
+Event types are set in `daylin-sq-server/config.yml`:
+
+```yaml
+events:
+  test-event:
+    mode: Simple
+    consumers: []
+  alphabet:
+    mode: Stream
+    consumers: []
+```
+
+Web pages from other origins can only call the server if their origin is in `corsOrigins`, which is empty by default. Any
+page can call it when this contains `"*"`, so only use that if everyone who can reach the server may use all of it:
+
+```yaml
+corsOrigins:
+  - "https://my-page.com"
 ```
 
 To run the test network, which should print "Hello from the producer" and 6.5, then stream the alphabet from the consumer
@@ -67,22 +101,133 @@ to the producer two letters at a time:
 docker compose -f java-tests/docker-compose.yml up --build
 ```
 
-## Example
+### Java and Kotlin client
+Java 25 and Gradle 9.9 are required. Test it with `gradle -p daylin-sq-client-java test`.
+
+To use it, add `includeBuild("../daylin-sq-client-java")` to `settings.gradle.kts`, with the path to this repository, and
+this to `build.gradle.kts`:
+
+```kotlin
+dependencies {
+    implementation("com.daylin:daylin-sq-client-java:0.0.1-SNAPSHOT")
+}
+```
+
+### Rust client
+Rust 1.89 or newer is required. Test it with `cargo test` in `daylin-sq-client-rust`.
+
+To use it, add this to `Cargo.toml`, with the path to this repository. It runs on tokio.
+
+```toml
+[dependencies]
+daylin-sq-client-rust = { path = "../daylin-sq-client-rust" }
+```
+
+The `https` feature is on by default, and needs the system to have CA certificates even when only http is used. Some small
+Docker images have none, so either install them or turn the feature off with `default-features = false`.
+
+### JavaScript and TypeScript client
+Node 22 or newer is required. Test it with `npm test` in `daylin-sq-client-js`. There is nothing to build, and it has no
+dependencies.
+
+To use it, install it with the path to this repository:
+
+```
+npm install ../daylin-sq-client-js
+```
+
+`daylin-sq-client-js` also works in browsers, while `daylin-sq-client-js/consumer` hosts endpoints and so only works in
+Node. A web page must be from the same origin as the server, or have its origin in `corsOrigins` in `config.yml`.
+
+## Examples
+Each of these consumes a simple event and submits it, then does the same with a stream event and tells the producer how to
+contact the consumer. The files in `examples` also host the stream and read it.
+
+### Kotlin
 ```kotlin
 val client = StreamQueueClient("http://localhost:5000")
 
 StreamQueueConsumer(client, "my-consumer", "test-event") { event -> println(event.message) }.start()
-
 client.submitEvent("test-event", "hello")
-```
 
-With a stream event type:
-
-```kotlin
 StreamQueueConsumer(
     client, "my-consumer", "alphabet",
     streamResponse = { event -> StreamEventResponse("http://my-consumer:3244/${event.id}", "two letters on each line") }
 ) { event -> println(event.message) }.start()
-
 client.submitEvent("alphabet", "hello", contact = "http://my-producer:3245/contact")
+```
+
+### Java
+```java
+StreamQueueClient client = new StreamQueueClient("http://localhost:5000");
+
+// the arguments are the port, public address, max running events, stream response and handler
+new StreamQueueConsumer(client, "my-consumer", "test-event", 0, port -> "http://localhost:" + port, 1, null, event -> {
+    System.out.println(event.getMessage());
+    return Unit.INSTANCE;
+}).start();
+client.submitEvent("test-event", "hello", null);
+
+new StreamQueueConsumer(
+    client, "my-consumer", "alphabet", 0, port -> "http://localhost:" + port, 1,
+    event -> new StreamEventResponse("http://my-consumer:3244/" + event.getId(), "two letters on each line"),
+    event -> {
+        System.out.println(event.getMessage());
+        return Unit.INSTANCE;
+    }
+).start();
+client.submitEvent("alphabet", "hello", "http://my-producer:3245/contact");
+```
+
+### Rust
+```rust
+let client = StreamQueueClient::new("http://localhost:5000")?;
+
+let mut simple = StreamQueueConsumer::builder(client.clone(), "my-consumer", "test-event", |event| async move {
+    println!("{}", event.message);
+    Ok(())
+})
+.build();
+simple.start().await?;
+client.submit_event("test-event", "hello", None).await?;
+
+let mut stream = StreamQueueConsumer::builder(client.clone(), "my-consumer", "alphabet", |event| async move {
+    println!("{}", event.message);
+    Ok(())
+})
+.stream_response(|event| async move {
+    Ok(StreamEventResponse {
+        contact_address: format!("http://my-consumer:3244/{}", event.id),
+        extra_info: Some("two letters on each line".into())
+    })
+})
+.build();
+stream.start().await?;
+client.submit_event("alphabet", "hello", Some("http://my-producer:3245/contact")).await?;
+```
+
+### JavaScript and TypeScript
+```ts
+import { StreamQueueClient } from "daylin-sq-client-js";
+import { StreamQueueConsumer } from "daylin-sq-client-js/consumer";
+
+const client = new StreamQueueClient("http://localhost:5000");
+
+await new StreamQueueConsumer(client, {
+  name: "my-consumer",
+  eventType: "test-event",
+  handler: (event) => console.log(event.message)
+}).start();
+await client.submitEvent("test-event", "hello");
+
+await new StreamQueueConsumer(client, {
+  name: "my-consumer",
+  eventType: "alphabet",
+  streamResponse: (event) => ({
+    contactAddress: `http://my-consumer:3244/${event.id}`,
+    "extra-info": "two letters on each line"
+  }),
+  handler: (event) => console.log(event.message)
+}).start();
+await client.submitEvent("alphabet", "hello", "http://my-producer:3245/contact");
 ```

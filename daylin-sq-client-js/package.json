@@ -1,0 +1,25 @@
+{
+  "name": "daylin-sq-client-js",
+  "version": "0.0.1",
+  "description": "Submits and consumes events of a daylin-sq server",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "files": [
+    "src"
+  ],
+  "exports": {
+    ".": {
+      "types": "./src/client.d.ts",
+      "default": "./src/client.js"
+    },
+    "./consumer": {
+      "types": "./src/consumer.d.ts",
+      "default": "./src/consumer.js"
+    }
+  },
+  "scripts": {
+    "test": "node --test"
+  }
+}

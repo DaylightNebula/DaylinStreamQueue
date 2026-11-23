@@ -18,7 +18,7 @@ repositories {
 }
 
 dependencies {
-	implementation("com.daylin:daylin-sq-client:0.0.1-SNAPSHOT")
+	implementation("com.daylin:daylin-sq-client-java:0.0.1-SNAPSHOT")
 }
 
 application {
