@@ -132,6 +132,13 @@ test("consumer is active before it subscribes", async () => {
   assert.deepEqual(healthWhenSubscribing, FREE);
 });
 
+test("consumer subscribes with the response mode if it has a stream response", async () => {
+  await consumer().start();
+  assert.equal(subscription().mode, "Simple");
+  await consumer({ streamResponse: () => ({ contactAddress: "address" }) }).start();
+  assert.equal(subscription().mode, "Response");
+});
+
 test("consumer cannot start twice or resume before it starts", async () => {
   const created = consumer();
   await assert.rejects(created.resume(), /not started/);

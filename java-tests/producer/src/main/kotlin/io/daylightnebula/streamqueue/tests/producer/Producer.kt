@@ -2,6 +2,7 @@ package io.daylightnebula.streamqueue.tests.producer
 
 import com.sun.net.httpserver.HttpServer
 import io.daylightnebula.streamqueue.client.StreamQueueClient
+import io.daylightnebula.streamqueue.client.StreamQueueException
 import io.daylightnebula.streamqueue.core.StreamContact
 import io.daylightnebula.streamqueue.core.streamQueueJson
 import kotlinx.serialization.Serializable
@@ -12,6 +13,7 @@ import java.net.http.HttpRequest
 import java.net.http.HttpResponse
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.TimeUnit
+import kotlin.uuid.Uuid
 
 /**
  * The message of a test event, must match the one in the consumer.
@@ -32,9 +34,22 @@ fun main() {
 
     val client = StreamQueueClient(System.getenv("SERVER_ADDRESS") ?: "http://localhost:5000")
     val message = streamQueueJson.encodeToString(TestEvent("Hello from the producer", 2.5, 4.0))
-    println("Sent event ${client.submitEvent("test-event", message)}")
+    println("Sent event ${submit(client, "test-event", message)}")
 
     streamAlphabet(client, System.getenv("PUBLIC_HOST") ?: "localhost")
+}
+
+/** Keeps trying to submit an event, as its type is not registered until the consumer has subscribed. */
+private fun submit(client: StreamQueueClient, eventType: String, message: String, contact: String? = null): Uuid {
+    while (true) {
+        try {
+            return client.submitEvent(eventType, message, contact)
+        } catch (e: StreamQueueException) {
+            if (e.status != 404) throw e
+            println("$eventType is not registered yet")
+            Thread.sleep(2_000)
+        }
+    }
 }
 
 /** Sends an alphabet event, waits to be told how to contact its consumer, then prints what it streams. */
@@ -50,7 +65,7 @@ private fun streamAlphabet(client: StreamQueueClient, host: String) {
     server.start()
 
     try {
-        val id = client.submitEvent("alphabet", "the ABC's please", "http://$host:$CONTACT_PORT/contact")
+        val id = submit(client, "alphabet", "the ABC's please", "http://$host:$CONTACT_PORT/contact")
         println("Sent event $id")
         val contact = contacted.get(30, TimeUnit.SECONDS)
         println("Streaming \"${contact.message}\" from ${contact.contact} with ${contact.extraInfo}")

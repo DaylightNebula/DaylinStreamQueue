@@ -45,7 +45,7 @@ class StreamQueueClient(serverAddress: String) {
      * @param eventType the type of the event
      * @param message the message of the event
      * @param contact url called with a POST of a [StreamContact] once a subscriber receives the event, or null to not be
-     * called. Only allowed if the mode of the event type is stream
+     * called. Only allowed if the mode of the event type is response
      * @return the id of the event
      * @throws StreamQueueException if the call fails
      */

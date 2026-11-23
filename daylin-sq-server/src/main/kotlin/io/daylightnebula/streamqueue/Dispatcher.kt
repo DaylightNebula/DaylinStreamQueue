@@ -1,8 +1,10 @@
 package io.daylightnebula.streamqueue
 
 import io.daylightnebula.streamqueue.core.EventMessage
+import io.daylightnebula.streamqueue.core.EventMode
 import io.daylightnebula.streamqueue.core.StreamContact
 import org.slf4j.LoggerFactory
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Semaphore
 import kotlin.concurrent.thread
 
@@ -12,41 +14,46 @@ object Dispatcher {
     private val logger = LoggerFactory.getLogger(Dispatcher::class.java)
 
     @Volatile
-    private var triggers = emptyMap<String, Semaphore>()
+    private var triggers: ConcurrentHashMap<String, Semaphore>? = null
 
-    /**
-     * Starts the thread of each event type. They stay idle until they are triggered.
-     *
-     * @param eventTypes the event types to send
-     */
-    fun start(eventTypes: Set<String>) {
-        triggers = eventTypes.associateWith { Semaphore(0) }
-        triggers.forEach { (eventType, trigger) ->
-            thread(isDaemon = true, name = "dispatch-$eventType") {
-                while (true) {
-                    // a trigger during dispatch leaves a permit, so that it is never missed
-                    trigger.acquire()
-                    trigger.drainPermits()
-                    runCatching { dispatch(eventType) }
-                        .onFailure { logger.error("Failed to dispatch {}", eventType, it) }
-                }
-            }
-        }
+    /** Lets event types be triggered, the thread of each one is started the first time that it is. */
+    fun start() {
+        triggers = ConcurrentHashMap()
+    }
+
+    /** Stops event types from being triggered. */
+    fun stop() {
+        triggers = null
     }
 
     /**
-     * Wakes the thread of an event type, called whenever an event may have become sendable. Does nothing if it was not
+     * Wakes the thread of an event type, called whenever an event may have become sendable. Does nothing if this was not
      * started.
      *
-     * @param eventType the event type to send
+     * @param eventType the event type to send, must be registered
      */
     fun trigger(eventType: String) {
-        triggers[eventType]?.release()
+        triggers?.computeIfAbsent(eventType, ::startThread)?.release()
+    }
+
+    /** Starts the thread of an event type, which stays idle until the returned semaphore is released. */
+    private fun startThread(eventType: String): Semaphore {
+        val trigger = Semaphore(0)
+        thread(isDaemon = true, name = "dispatch-$eventType") {
+            while (true) {
+                // a trigger during dispatch leaves a permit, so that it is never missed
+                trigger.acquire()
+                trigger.drainPermits()
+                runCatching { dispatch(eventType) }
+                    .onFailure { logger.error("Failed to dispatch {}", eventType, it) }
+            }
+        }
+        return trigger
     }
 
     /**
      * Sends waiting events to subscribers until there are no more events or no subscriber can take one. An event that
-     * is sent is marked as received, and if its mode is stream then its producer is told how to contact the subscriber.
+     * is sent is marked as received, and if its mode is response then its producer is told how to contact the subscriber.
      * An event that fails to send goes back to the front of the queue and its subscription is removed.
      *
      * @param eventType the event type to send
@@ -59,7 +66,7 @@ object Dispatcher {
             val subscriber = Subscriptions.nextAvailable(eventType) ?: return
             val event = store.borrow(durations) ?: return
 
-            if (!send(eventType, event, subscriber.subscription.eventEndpoint)) {
+            if (!send(eventType, store.mode, event, subscriber.subscription.eventEndpoint)) {
                 store.giveBack(event)
                 Subscriptions.remove(subscriber)
             }
@@ -67,9 +74,9 @@ object Dispatcher {
     }
 
     /** Returns false if the subscriber did not receive the event. */
-    private fun send(eventType: String, event: Database.BorrowedEvent, endpoint: String): Boolean {
+    private fun send(eventType: String, mode: EventMode, event: Database.BorrowedEvent, endpoint: String): Boolean {
         val message = EventMessage(event.id, eventType, event.message)
-        if (Config.get().events[eventType]?.mode != Config.Mode.Stream) {
+        if (mode == EventMode.Simple) {
             if (!SubscriberClient.sendEvent(endpoint, message)) return false
             Database.markReceived(eventType, event)
             return true

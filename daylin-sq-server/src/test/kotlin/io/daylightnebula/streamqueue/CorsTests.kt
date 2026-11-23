@@ -25,7 +25,7 @@ class CorsTests {
     }
 
     private fun mockMvc(vararg origins: String): MockMvc {
-        Config.config = Config(events = emptyMap(), corsOrigins = origins.toList())
+        Config.config = Config(corsOrigins = origins.toList())
         context.servletContext = MockServletContext()
         context.register(Mvc::class.java, Cors::class.java, Service::class.java)
         context.refresh()

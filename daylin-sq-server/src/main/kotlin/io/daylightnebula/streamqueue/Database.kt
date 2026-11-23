@@ -1,5 +1,6 @@
 package io.daylightnebula.streamqueue
 
+import io.daylightnebula.streamqueue.core.EventMode
 import org.rocksdb.ColumnFamilyDescriptor
 import org.rocksdb.ColumnFamilyHandle
 import org.rocksdb.DBOptions
@@ -21,10 +22,20 @@ import kotlin.uuid.Uuid
 import kotlin.uuid.getUuid
 import kotlin.uuid.putUuid
 
+/**
+ * Thrown when an event type is already registered with another mode.
+ *
+ * @param eventType the event type
+ * @param mode the mode that it is registered with
+ */
+class ModeConflictException(eventType: String, mode: EventMode):
+    IllegalStateException("The event type $eventType is already registered with the mode $mode")
+
 object Database {
 
     private const val PATH = "data"
     private const val SUBSCRIPTIONS_FAMILY = "daylin-sq-subscriptions"
+    private const val EVENT_TYPES_FAMILY = "daylin-sq-event-types"
     private const val READY: Byte = 0
     private const val TAKEN: Byte = 1
     private const val RECEIVED: Byte = 2
@@ -39,7 +50,14 @@ object Database {
 
     lateinit var writeOptions: WriteOptions
     lateinit var db: RocksDB
+
+    @Volatile
     lateinit var stores: Map<String, EventStore>
+
+    // every column family by name, including ones of event types that are not registered
+    lateinit var families: Map<String, ColumnFamilyHandle>
+        private set
+    private val registerLock = ReentrantLock()
 
     /**
      * An event that is hidden from other borrows.
@@ -66,8 +84,9 @@ object Database {
      *
      * @param db the database to keep the queue in
      * @param family the column family of the queue
+     * @param mode how the events in the queue are handled
      */
-    class EventStore(private val db: RocksDB, private val family: ColumnFamilyHandle) {
+    class EventStore(private val db: RocksDB, private val family: ColumnFamilyHandle, val mode: EventMode) {
         private data class Held(
             val seq: Long,
             val takenAt: Long,
@@ -357,31 +376,9 @@ object Database {
         }
     }
 
-    /**
-     * Opens the database with a store for each event in the config, loads the subscriptions and starts removing old
-     * events.
-     */
+    /** Opens the database and starts removing old events. */
     fun init() {
-        // setup Rock DB
-        RocksDB.loadLibrary()
-        writeOptions = WriteOptions().setSync(false)
-
-        // pull all possible event ids
-        val events = Config.get().events.keys
-        require(SUBSCRIPTIONS_FAMILY !in events) { "An event cannot be named $SUBSCRIPTIONS_FAMILY" }
-
-        // RocksDB must open every existing column family, including ones no longer in the config
-        val existing = Options().use { RocksDB.listColumnFamilies(it, PATH) }.map { it.decodeToString() }
-        val names = (existing + "default" + SUBSCRIPTIONS_FAMILY + events).distinct()
-
-        val handles = mutableListOf<ColumnFamilyHandle>()
-        val options = DBOptions().setCreateIfMissing(true).setCreateMissingColumnFamilies(true)
-        db = RocksDB.open(options, PATH, names.map { ColumnFamilyDescriptor(it.encodeToByteArray()) }, handles)
-        stores = names.zip(handles).filter { (name, _) -> name in events }.associate { (name, family) ->
-            name to EventStore(db, family)
-        }
-        Subscriptions.init(SubscriptionStore(db, handles[names.indexOf(SUBSCRIPTIONS_FAMILY)]))
-
+        open(PATH)
         thread(isDaemon = true, name = "event-cleanup") {
             while (true) {
                 Thread.sleep(cleanupInterval.inWholeMilliseconds)
@@ -392,6 +389,77 @@ object Database {
             }
         }
     }
+
+    /**
+     * Opens the database with a store for each event type that is registered and loads the subscriptions.
+     *
+     * @param path the folder of the database
+     */
+    fun open(path: String) {
+        // setup Rock DB
+        RocksDB.loadLibrary()
+        writeOptions = WriteOptions().setSync(false)
+
+        // RocksDB must open every existing column family, including ones that are not registered
+        val existing = Options().use { RocksDB.listColumnFamilies(it, path) }.map { it.decodeToString() }
+        val names = (existing + "default" + SUBSCRIPTIONS_FAMILY + EVENT_TYPES_FAMILY).distinct()
+
+        val handles = mutableListOf<ColumnFamilyHandle>()
+        val options = DBOptions().setCreateIfMissing(true).setCreateMissingColumnFamilies(true)
+        db = RocksDB.open(options, path, names.map { ColumnFamilyDescriptor(it.encodeToByteArray()) }, handles)
+        families = names.zip(handles).toMap()
+        stores = loadEventTypes().mapValues { (eventType, mode) ->
+            EventStore(db, families.getValue(eventType), mode)
+        }
+        Subscriptions.init(SubscriptionStore(db, families.getValue(SUBSCRIPTIONS_FAMILY)))
+    }
+
+    /**
+     * Checks if a name is used by the database, and so cannot be an event type.
+     *
+     * @param eventType the name to check
+     * @return true if it is used by the database
+     */
+    fun isReserved(eventType: String): Boolean = eventType == SUBSCRIPTIONS_FAMILY || eventType == EVENT_TYPES_FAMILY
+
+    /**
+     * Registers an event type so that its events can be submitted, does nothing if it is already registered.
+     *
+     * @param eventType the event type, cannot be reserved
+     * @param mode how its events are handled
+     * @throws ModeConflictException if the event type is already registered with another mode
+     */
+    fun register(eventType: String, mode: EventMode) {
+        registerLock.withLock {
+            val registered = stores[eventType]?.mode
+            if (registered == mode) return
+            if (registered != null) throw ModeConflictException(eventType, registered)
+            require(!isReserved(eventType)) { "An event type cannot be named $eventType" }
+
+            // the queue may exist from before event types were registered
+            val family = families[eventType]
+                ?: db.createColumnFamily(ColumnFamilyDescriptor(eventType.encodeToByteArray()))
+            families += eventType to family
+
+            val types = families.getValue(EVENT_TYPES_FAMILY)
+            db.put(types, writeOptions, eventType.encodeToByteArray(), mode.name.encodeToByteArray())
+            stores += eventType to EventStore(db, family, mode)
+        }
+        logger.info("Registered event type {} with mode {}", eventType, mode)
+    }
+
+    /** Reads the mode of every event type that is registered. */
+    private fun loadEventTypes(): Map<String, EventMode> =
+        db.newIterator(families.getValue(EVENT_TYPES_FAMILY)).use { iter ->
+            val types = mutableMapOf<String, EventMode>()
+            iter.seekToFirst()
+            while (iter.isValid) {
+                types[iter.key().decodeToString()] = EventMode.valueOf(iter.value().decodeToString())
+                iter.next()
+            }
+            iter.status()
+            types
+        }
 
     /**
      * Adds an event to the back of the queue.

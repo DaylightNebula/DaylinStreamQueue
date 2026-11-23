@@ -3,6 +3,7 @@ package io.daylightnebula.streamqueue.client
 import com.sun.net.httpserver.HttpExchange
 import com.sun.net.httpserver.HttpServer
 import io.daylightnebula.streamqueue.core.EventMessage
+import io.daylightnebula.streamqueue.core.EventMode
 import io.daylightnebula.streamqueue.core.HealthResponse
 import io.daylightnebula.streamqueue.core.StreamEventResponse
 import io.daylightnebula.streamqueue.core.Subscription
@@ -23,8 +24,8 @@ import kotlin.uuid.Uuid
  * @param publicAddress finds the address that the server can reach this consumer at, from the port that is used
  * @param maxRunning how many events to consume at once before responding as busy
  * @param streamResponse finds how the producer may contact this consumer about an event, called before the handler and
- * must return within 5 seconds. Required if the mode of the event type is stream, if this throws then the event is
- * rejected and the server removes the subscription
+ * must return within 5 seconds. The mode of the subscription is response if this is given and simple if not. If this
+ * throws then the event is rejected and the server removes the subscription
  * @param handler consumes an event, which is completed when this returns. If this throws, then the event is sent again
  * after the server's max processing duration
  */
@@ -81,7 +82,8 @@ class StreamQueueConsumer(
 
         // the server checks that this is active before it accepts the subscription
         active = true
-        return client.subscribe(Subscription(name, eventType, "$address/health", "$address/event"))
+        val mode = if (streamResponse != null) EventMode.Response else EventMode.Simple
+        return client.subscribe(Subscription(name, eventType, mode, "$address/health", "$address/event"))
     }
 
     /** Stops taking events and waits for the running ones to finish. */

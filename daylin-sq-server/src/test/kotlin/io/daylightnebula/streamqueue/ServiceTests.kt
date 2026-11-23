@@ -1,5 +1,6 @@
 package io.daylightnebula.streamqueue
 
+import io.daylightnebula.streamqueue.core.EventMode
 import org.junit.jupiter.api.io.TempDir
 import org.rocksdb.Options
 import org.rocksdb.RocksDB
@@ -28,7 +29,6 @@ class ServiceTests {
     lateinit var folder: Path
 
     private lateinit var db: RocksDB
-    private lateinit var store: Database.EventStore
 
     private val mockMvc = MockMvcBuilders.standaloneSetup(Service()).build()
     private val durations = Config.Durations(20.minutes, 20.minutes, 24.hours)
@@ -38,9 +38,8 @@ class ServiceTests {
         RocksDB.loadLibrary()
         Database.writeOptions = WriteOptions()
         db = RocksDB.open(Options().setCreateIfMissing(true), folder.toString())
-        store = Database.EventStore(db, db.defaultColumnFamily)
-        Database.stores = mapOf("test-event" to store)
-        Config.config = Config(events = emptyMap(), durations = durations)
+        useMode(EventMode.Simple)
+        Config.config = Config(durations = durations)
     }
 
     @AfterTest
@@ -50,9 +49,8 @@ class ServiceTests {
         Config.config = null
     }
 
-    private fun useMode(mode: Config.Mode) {
-        val events = mapOf("test-event" to Config.EventDescription(mode, emptyList()))
-        Config.config = Config(events = events, durations = durations)
+    private fun useMode(mode: EventMode) {
+        Database.stores = mapOf("test-event" to Database.EventStore(db, db.defaultColumnFamily, mode))
     }
 
     private fun post(message: String, contact: String?): ResultActionsDsl =
@@ -91,8 +89,8 @@ class ServiceTests {
     }
 
     @Test
-    fun `a stream event can be submitted with a contact address`() {
-        useMode(Config.Mode.Stream)
+    fun `a response event can be submitted with a contact address`() {
+        useMode(EventMode.Response)
         submit("hello", "http://producer:3245/contact?a=b&c=d")
 
         val event = assertNotNull(Database.borrow("test-event"))
@@ -101,8 +99,8 @@ class ServiceTests {
     }
 
     @Test
-    fun `a stream event can be submitted without a contact address`() {
-        useMode(Config.Mode.Stream)
+    fun `a response event can be submitted without a contact address`() {
+        useMode(EventMode.Response)
         submit("hello")
 
         assertNull(assertNotNull(Database.borrow("test-event")).contact)
@@ -110,7 +108,7 @@ class ServiceTests {
 
     @Test
     fun `invalid contact addresses are bad requests`() {
-        useMode(Config.Mode.Stream)
+        useMode(EventMode.Response)
         listOf("", "not a url", "localhost", "ftp://localhost/contact", "http://").forEach {
             post("hello", it).andExpect { status { isBadRequest() } }
         }
@@ -120,7 +118,7 @@ class ServiceTests {
 
     @Test
     fun `a simple event cannot be submitted with a contact address`() {
-        useMode(Config.Mode.Simple)
+        useMode(EventMode.Simple)
         post("hello", "http://producer/contact").andExpect { status { isBadRequest() } }
 
         assertNull(Database.borrow("test-event"))

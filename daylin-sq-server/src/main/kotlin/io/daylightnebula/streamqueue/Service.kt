@@ -1,5 +1,6 @@
 package io.daylightnebula.streamqueue
 
+import io.daylightnebula.streamqueue.core.EventMode
 import io.daylightnebula.streamqueue.core.Subscription
 import org.springframework.http.HttpStatus
 import org.springframework.web.bind.annotation.GetMapping
@@ -27,10 +28,10 @@ class Service {
     /**
      * Adds an event to the back of its queue.
      *
-     * @param eventType the type of the event, not found if it is not in the config
+     * @param eventType the type of the event, not found if nothing has ever subscribed to it
      * @param message the message of the event
      * @param contact where the producer may be told how to contact the subscriber, a bad request if it is not a valid
-     * url or the mode of the event type is not stream
+     * url or the mode of the event type is not response
      * @return the id of the event
      */
     @PostMapping("/submit-event/{eventType}")
@@ -39,9 +40,9 @@ class Service {
         @RequestBody message: String,
         @RequestParam("contact", required = false) contact: String?
     ): String {
-        if (eventType !in Database.stores) throw ResponseStatusException(HttpStatus.NOT_FOUND)
-        if (contact != null && Config.get().events[eventType]?.mode != Config.Mode.Stream)
-            throw ResponseStatusException(HttpStatus.BAD_REQUEST, "Only stream events can have a contact address")
+        val store = Database.stores[eventType] ?: throw ResponseStatusException(HttpStatus.NOT_FOUND)
+        if (contact != null && store.mode != EventMode.Response)
+            throw ResponseStatusException(HttpStatus.BAD_REQUEST, "Only response events can have a contact address")
         if (contact != null && !SubscriberClient.isValidEndpoint(contact))
             throw ResponseStatusException(HttpStatus.BAD_REQUEST, "The contact address is not a valid url")
 
@@ -54,11 +55,12 @@ class Service {
     /**
      * Subscribes to an event type. The subscriber must be fully set up before calling this, its health endpoint is
      * called during the request and must respond as active (busy does not matter). An older subscription to the same
-     * event type with the same health endpoint is ejected.
+     * event type with the same health endpoint is ejected. The event type is registered with the mode of the first
+     * subscription to it.
      *
-     * @param eventType the event type to subscribe to, not found if it is not in the config
+     * @param eventType the event type to subscribe to, a bad request if it is used by the server
      * @param subscription the subscription, a bad request if its event type is different or an endpoint is not a valid
-     * url, and unprocessable if it is not active
+     * url, unprocessable if it is not active, and a conflict if its event type is registered with another mode
      * @return the id of the subscription
      */
     @PostMapping("/subscribe/{eventType}")
@@ -66,7 +68,8 @@ class Service {
         @PathVariable("eventType") eventType: String,
         @RequestBody subscription: Subscription
     ): String {
-        if (eventType !in Database.stores) throw ResponseStatusException(HttpStatus.NOT_FOUND)
+        if (Database.isReserved(eventType))
+            throw ResponseStatusException(HttpStatus.BAD_REQUEST, "The event type is used by the server")
         if (subscription.eventType != eventType)
             throw ResponseStatusException(HttpStatus.BAD_REQUEST, "The event type must match the path")
         if (!SubscriberClient.isValidEndpoint(subscription.healthEndpoint))
@@ -74,7 +77,12 @@ class Service {
         if (!SubscriberClient.isValidEndpoint(subscription.eventEndpoint))
             throw ResponseStatusException(HttpStatus.BAD_REQUEST, "The event endpoint is not a valid url")
 
-        val id = Subscriptions.add(subscription)
+        val added = try {
+            Subscriptions.add(subscription)
+        } catch (e: ModeConflictException) {
+            throw ResponseStatusException(HttpStatus.CONFLICT, e.message, e)
+        }
+        val id = added
             ?: throw ResponseStatusException(HttpStatus.UNPROCESSABLE_CONTENT, "The health endpoint is not active")
         Dispatcher.trigger(eventType)
         return id.toString()

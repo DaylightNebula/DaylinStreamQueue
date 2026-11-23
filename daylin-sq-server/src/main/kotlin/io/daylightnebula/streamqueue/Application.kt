@@ -13,7 +13,7 @@ class DaylinSQApplication
  */
 fun main(args: Array<String>) {
 	Database.init()
-	Dispatcher.start(Database.stores.keys)
+	Dispatcher.start()
 	runApplication<DaylinSQApplication>(*args)
 
 	// subscribers that are sent an event need to be able to call this server back

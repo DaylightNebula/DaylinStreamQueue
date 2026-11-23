@@ -87,6 +87,7 @@ export class StreamQueueConsumer {
     return this.#client.subscribe({
       name: this.#options.name,
       eventType: this.#options.eventType,
+      mode: this.#options.streamResponse ? "Response" : "Simple",
       healthEndpoint: `${address}/health`,
       eventEndpoint: `${address}/event`
     });

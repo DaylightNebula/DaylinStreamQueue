@@ -1,25 +1,26 @@
 # Daylin Stream Queue
 The goal of this project is to build a system that allows event producers to connect to this service, send an event,
-then establish a webstream link that the two can stream data over.  This allows for systems where a producer needs to
-stream data and talk to some kind of interactive services consuming the event.  This is nice for things like a build
-service for remotely building projects where you need to stream logs, results, and keyboard events to and from the user.
+then allow the consumer to respond to the producer.  This allows for systems where a producer needs to stream data and 
+talk to some kind of interactive services consuming the event.  This is nice for things like a build service for remotely 
+building projects where you need to stream logs, results, and keyboard events to and from the user.
 
 ## What it does
 Producers submit events to the server over HTTP, and the server queues and sends each one to a consumer that is free.
 The architecture is similar to that of a more complex version of RabbitMQ:
 
-- Event types are described in a `config.yml` file, which gives each one a mode.
+- An event type is registered by the first subscription to it, which gives it a mode. It stays registered with that mode,
+  and events cannot be submitted to it before then.
 - Events are kept in a database until they are completed, so they survive restarts. An event that its consumer does not
   finish in time is sent again.
 - Consumers subscribe to an event type, and its events are sent to the free ones in turn.
 - A `Simple` event is sent to a consumer and that is all.
-- A `Stream` event also lets its producer and consumer talk to each other while it is processed. The server passes on how
+- A `Response` event also lets its producer and consumer talk to each other while it is processed. The server passes on how
   to contact the consumer, and how they then talk is up to them.
 
 ### Projects
 Each folder is its own project.
 
-- `daylin-sq-server`: The server, run it from its folder so that it finds `config.yml`
+- `daylin-sq-server`: The server, it keeps its `data` folder and finds `config.yml` where it is run
 - `daylin-sq-client-java`: Library for submitting and consuming events from Java and Kotlin
 - `daylin-sq-client-rust`: Library for submitting and consuming events from Rust
 - `daylin-sq-client-js`: Library for submitting and consuming events from JavaScript and TypeScript
@@ -31,6 +32,7 @@ Each folder is its own project.
 The clients do all of this, so it is only needed to use the server without one.
 
 To submit an event, post its raw message to `/api/submit-event/{eventType}`, which returns the id of the event.
+It is rejected with a 404 if nothing has ever subscribed to the event type.
 
 To subscribe, post a subscription to `/api/subscribe/{eventType}`, which returns the id of the subscription:
 
@@ -38,11 +40,14 @@ To subscribe, post a subscription to `/api/subscribe/{eventType}`, which returns
 {
   "name": "my-consumer",
   "eventType": "test-event",
+  "mode": "Simple",
   "healthEndpoint": "http://my-consumer:3242/health",
   "eventEndpoint": "http://my-consumer:3242/event"
 }
 ```
 
+- The mode is `Simple` or `Response`. The first subscription to an event type registers it with its mode, and later ones
+  are rejected with a 409 if their mode is different.
 - A subscriber must be fully set up before it subscribes. Its health endpoint is called during the request, and the
   subscription is rejected with a 422 unless it responds as active. It may be busy.
 - The health endpoint returns a 200 with `{"isActive": true, "acceptingEvents": true}`, where `acceptingEvents` is false
@@ -53,7 +58,7 @@ To subscribe, post a subscription to `/api/subscribe/{eventType}`, which returns
 - Events are posted to the event endpoint as `{"id": "...", "eventType": "...", "message": "..."}`. Return a 200 within 5
   seconds to mark the event as received, then post to `/api/complete-event/{id}` once finished.
 
-When the mode of an event type is `Stream`:
+When the mode of an event type is `Response`:
 
 1. The producer posts the event to `/api/submit-event/{eventType}?contact=...`, where `contact` is an optional url encoded
    address that it can be called on.
@@ -74,16 +79,16 @@ gradle -p daylin-sq-server bootRun
 docker build -f daylin-sq-server/Dockerfile .
 ```
 
-Event types are set in `daylin-sq-server/config.yml`:
+The server can be configured with a `config.yml` file where it is run. The file is optional, and so is every value in it.
+The time limits are ISO 8601 durations, with these defaults:
 
 ```yaml
-events:
-  test-event:
-    mode: Simple
-    consumers: []
-  alphabet:
-    mode: Stream
-    consumers: []
+durations:
+  maxNoReceiveDuration: PT10S
+  maxProcessingDuration: PT20M
+  maxTimeInQueue: PT24H
+  healthCheckInterval: PT30S
+  subscriberTimeout: PT5S
 ```
 
 Web pages from other origins can only call the server if their origin is in `corsOrigins`, which is empty by default. Any
@@ -140,8 +145,9 @@ npm install ../daylin-sq-client-js
 Node. A web page must be from the same origin as the server, or have its origin in `corsOrigins` in `config.yml`.
 
 ## Examples
-Each of these consumes a simple event and submits it, then does the same with a stream event and tells the producer how to
-contact the consumer. The files in `examples` also host the stream and read it.
+Each of these consumes a simple event and submits it, then does the same with a response event and tells the producer how
+to contact the consumer. A consumer uses the `Response` mode if it is given a stream response, and `Simple` if not.
+The files in `examples` also host the stream and read it.
 
 ### Kotlin
 ```kotlin

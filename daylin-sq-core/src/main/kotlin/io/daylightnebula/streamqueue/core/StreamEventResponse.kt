@@ -4,7 +4,7 @@ import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
 /**
- * What a subscriber's event endpoint must respond with when the mode of the event is stream.
+ * What a subscriber's event endpoint must respond with when the mode of the event is response.
  *
  * @param contactAddress how the producer may contact the subscriber while it processes the event
  * @param extraInfo passed on to the producer as it is, if there is any

@@ -11,8 +11,8 @@ import type { EventMessage, StreamEventResponse, StreamQueueClient } from "./cli
  *   http://localhost:port by default
  * * maxRunning: How many events to consume at once before responding as busy, 1 by default
  * * streamResponse: Finds how the producer may contact the consumer about an event, called before the handler and must
- *   finish within 5 seconds.  Required if the mode of the event type is stream, if this throws then the event is rejected
- *   and the server removes the subscription
+ *   finish within 5 seconds.  The mode of the subscription is response if this is given and simple if not.  If this throws
+ *   then the event is rejected and the server removes the subscription
  * * handler: Consumes an event, which is completed when this finishes.  If this throws, then the event is sent again
  *   after the server's max processing duration
  */

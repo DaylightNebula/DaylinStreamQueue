@@ -20,7 +20,7 @@ use tokio::task::JoinHandle;
 use tokio_util::task::TaskTracker;
 use uuid::Uuid;
 
-use crate::{EventMessage, HealthResponse, StreamEventResponse, StreamQueueClient, Subscription};
+use crate::{EventMessage, EventMode, HealthResponse, StreamEventResponse, StreamQueueClient, Subscription};
 
 /// How long closing a consumer waits for the calls to its endpoints to finish.
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -80,7 +80,8 @@ impl StreamQueueConsumerBuilder {
         self
     }
 
-    /// Sets how the producer may contact the consumer about an event.  Required if the mode of the event type is stream.
+    /// Sets how the producer may contact the consumer about an event.  The mode of the subscription is response if this
+    /// is set and simple if not.
     ///
     /// # Parameters
     /// * stream_response: Called before the handler, and must finish within 5 seconds.  If this fails then the event is
@@ -222,9 +223,14 @@ impl StreamQueueConsumer {
         let server = self.server.as_ref().context("the consumer was not started")?;
         let public_address = (self.public_address)(server.port);
         let address = public_address.trim_end_matches('/');
+        let mode = match self.shared.stream_response {
+            Some(_) => EventMode::Response,
+            None => EventMode::Simple
+        };
         let subscription = Subscription {
             name: self.name.clone(),
             event_type: self.event_type.clone(),
+            mode,
             health_endpoint: format!("{address}/health"),
             event_endpoint: format!("{address}/event")
         };

@@ -2,6 +2,7 @@ package io.daylightnebula.streamqueue.client
 
 import com.sun.net.httpserver.HttpServer
 import io.daylightnebula.streamqueue.core.EventMessage
+import io.daylightnebula.streamqueue.core.EventMode
 import io.daylightnebula.streamqueue.core.HealthResponse
 import io.daylightnebula.streamqueue.core.StreamEventResponse
 import io.daylightnebula.streamqueue.core.Subscription
@@ -141,6 +142,18 @@ class StreamQueueConsumerTests {
         consumer().use { assertEquals(id, it.start()) }
 
         assertEquals(HealthResponse(isActive = true, acceptingEvents = true), healthWhenSubscribing)
+    }
+
+    @Test
+    fun `consumer subscribes with the response mode if it has a stream response`() {
+        consumer().use {
+            it.start()
+            assertEquals(EventMode.Simple, subscription().mode)
+        }
+        consumer(streamResponse = { StreamEventResponse("address") }).use {
+            it.start()
+            assertEquals(EventMode.Response, subscription().mode)
+        }
     }
 
     @Test

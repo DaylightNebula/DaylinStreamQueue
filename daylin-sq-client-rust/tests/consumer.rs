@@ -11,7 +11,7 @@ use axum::extract::{Request, State};
 use axum::http::StatusCode;
 use axum::routing::any;
 use daylin_sq_client_rust::{
-    EventMessage, HealthResponse, StatusError, StreamEventResponse, StreamQueueClient, StreamQueueConsumer,
+    EventMessage, EventMode, HealthResponse, StatusError, StreamEventResponse, StreamQueueClient, StreamQueueConsumer,
     StreamQueueConsumerBuilder, Subscription
 };
 use tokio::net::TcpListener;
@@ -188,11 +188,12 @@ fn messages_match_the_json_of_the_server() -> anyhow::Result<()> {
     let subscription = Subscription {
         name: "a".into(),
         event_type: "b".into(),
+        mode: EventMode::Response,
         health_endpoint: "c".into(),
         event_endpoint: "d".into()
     };
     assert_eq!(
-        r#"{"name":"a","eventType":"b","healthEndpoint":"c","eventEndpoint":"d"}"#,
+        r#"{"name":"a","eventType":"b","mode":"Response","healthEndpoint":"c","eventEndpoint":"d"}"#,
         serde_json::to_string(&subscription)?
     );
     Ok(())
@@ -256,6 +257,22 @@ async fn consumer_is_active_before_it_subscribes() -> anyhow::Result<()> {
     assert_eq!(ID, consumer.start().await?);
     assert_eq!(vec![FREE], *fixture.recorded.health.lock().unwrap());
     consumer.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn consumer_subscribes_with_the_response_mode_if_it_has_a_stream_response() -> anyhow::Result<()> {
+    let fixture = Fixture::new().await?;
+    let mut simple = fixture.consumer(ignore).build();
+    simple.start().await?;
+    assert_eq!(EventMode::Simple, fixture.subscription()?.mode);
+
+    let mut response = fixture
+        .consumer(ignore)
+        .stream_response(|_| async { bail!("not called by the test") })
+        .build();
+    response.start().await?;
+    assert_eq!(EventMode::Response, fixture.subscription()?.mode);
     Ok(())
 }
 

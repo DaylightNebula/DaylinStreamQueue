@@ -1,9 +1,6 @@
 package io.daylightnebula.streamqueue
 
-import com.charleskorn.kaml.PolymorphismStyle
 import com.charleskorn.kaml.Yaml
-import com.charleskorn.kaml.YamlConfiguration
-import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.decodeFromString
 import java.io.File
@@ -14,16 +11,14 @@ import kotlin.time.Duration.Companion.seconds
 import kotlin.uuid.Uuid
 
 /**
- * The config of the server.
+ * The config of the server, every value is optional.
  *
- * @param events describes each event type by name
  * @param id identifies the server
  * @param durations the time limits used by the server
  * @param corsOrigins the origins of the web pages that may call the server from a browser, or * for any of them
  */
 @Serializable
 data class Config(
-    val events: Map<String, EventDescription>,
     val id: Uuid = Uuid.random(),
     val durations: Durations = Durations(),
     val corsOrigins: List<String> = emptyList()
@@ -31,21 +26,18 @@ data class Config(
     companion object {
         var config: Config? = null
         
-        val yaml = Yaml(
-            configuration = YamlConfiguration(
-                polymorphismStyle = PolymorphismStyle.Property
-            )
-        )
+        val yaml = Yaml.default
 
         /**
-         * Reads the config from config.yml and caches it.
+         * Reads the config and caches it.
          *
+         * @param file the file to read, the default values are used if it is not a file
          * @return the config that was read
          */
-        fun load(): Config {
-            val content = File("config.yml").readText()
-            config = yaml.decodeFromString<Config>(content)
-            return config!!
+        fun load(file: File = File("config.yml")): Config {
+            val loaded = if (file.isFile) yaml.decodeFromString<Config>(file.readText()) else Config()
+            config = loaded
+            return loaded
         }
 
         /**
@@ -54,34 +46,6 @@ data class Config(
          * @return the config
          */
         fun get() = config ?: load()
-    }
-
-    /**
-     * Describes an event type.
-     *
-     * @param mode the mode the event is handled with
-     * @param consumers where the event is sent
-     */
-    @Serializable
-    data class EventDescription(
-        val mode: Mode,
-        val consumers: List<Consumer>
-    )
-
-    enum class Mode {
-        Simple,
-        Stream
-    }
-
-    @Serializable
-    sealed class Consumer {
-        /**
-         * A consumer that is called over HTTP.
-         *
-         * @param address the url to call
-         */
-        @Serializable @SerialName("Http")
-        class Http(val address: String): Consumer()
     }
 
     /**

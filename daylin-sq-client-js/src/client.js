@@ -45,7 +45,7 @@ export class StreamQueueClient {
    * @param {string} eventType - The type of the event.
    * @param {string} message - The message of the event.
    * @param {string} [contact] - Url called with a POST of a `StreamContact` once a subscriber receives the event, or left
-   *   out to not be called.  Only allowed if the mode of the event type is stream.
+   *   out to not be called.  Only allowed if the mode of the event type is response.
    * @returns {Promise<string>} The id of the event.
    * @throws {StreamQueueError} If the call fails.
    */

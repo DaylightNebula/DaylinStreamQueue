@@ -66,7 +66,7 @@ object SubscriberClient {
     fun sendEvent(endpoint: String, event: EventMessage): Boolean = postEvent(endpoint, event) != null
 
     /**
-     * Posts a stream event to an event endpoint.
+     * Posts a response event to an event endpoint.
      *
      * @param endpoint the url of the event endpoint
      * @param event the event to send

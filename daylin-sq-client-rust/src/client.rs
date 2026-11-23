@@ -74,7 +74,7 @@ impl StreamQueueClient {
     /// * event_type: The type of the event.
     /// * message: The message of the event.
     /// * contact: Url called with a POST of a [`StreamContact`](crate::StreamContact) once a subscriber receives the
-    ///   event, or `None` to not be called.  Only allowed if the mode of the event type is stream.
+    ///   event, or `None` to not be called.  Only allowed if the mode of the event type is response.
     ///
     /// # Errors
     /// * The server cannot be called.

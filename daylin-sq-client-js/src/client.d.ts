@@ -13,6 +13,15 @@ export interface EventMessage {
 }
 
 /**
+ * How the events of a type are handled.
+ *
+ * Variants:
+ * * Simple: Events are only sent to a subscriber
+ * * Response: The subscriber must return a `StreamEventResponse` that is passed on to the producer
+ */
+export type EventMode = "Simple" | "Response";
+
+/**
  * What a subscriber's health endpoint responds with.
  *
  * Fields:
@@ -25,7 +34,7 @@ export interface HealthResponse {
 }
 
 /**
- * The body posted to the contact address of a producer once a subscriber has received its stream event.
+ * The body posted to the contact address of a producer once a subscriber has received its response event.
  *
  * Fields:
  * * message: The event's message, exactly as it was submitted
@@ -39,7 +48,7 @@ export interface StreamContact {
 }
 
 /**
- * What a subscriber's event endpoint must respond with when the mode of the event is stream.
+ * What a subscriber's event endpoint must respond with when the mode of the event is response.
  *
  * Fields:
  * * contactAddress: How the producer may contact the subscriber while it processes the event
@@ -58,13 +67,15 @@ export interface StreamEventResponse {
  *
  * Fields:
  * * name: Not unique, just used for debugging
- * * eventType: What event type this subscription is subscribing to
+ * * eventType: What event type this subscription is subscribing to, which is registered if it does not exist yet
+ * * mode: How the events are handled, must match the mode that the event type was registered with
  * * healthEndpoint: Url called with a GET for a `HealthResponse`
  * * eventEndpoint: Url called with a POST of an `EventMessage` for each event
  */
 export interface Subscription {
   name: string;
   eventType: string;
+  mode: EventMode;
   healthEndpoint: string;
   eventEndpoint: string;
 }
@@ -102,7 +113,7 @@ export class StreamQueueClient {
    * @param eventType - The type of the event.
    * @param message - The message of the event.
    * @param contact - Url called with a POST of a `StreamContact` once a subscriber receives the event, or left out to
-   *   not be called.  Only allowed if the mode of the event type is stream.
+   *   not be called.  Only allowed if the mode of the event type is response.
    * @returns The id of the event.
    * @throws {StreamQueueError} If the call fails.
    */

@@ -59,16 +59,19 @@ object Subscriptions {
     }
 
     /**
-     * Adds a subscription if its health endpoint responds as active, whether it is busy does not matter. An existing
-     * subscription to the same event type with the same health endpoint is ejected.
+     * Adds a subscription if its health endpoint responds as active, whether it is busy does not matter. Its event type
+     * is registered if it does not exist yet. An existing subscription to the same event type with the same health
+     * endpoint is ejected.
      *
      * @param subscription the subscription to add
      * @return the id of the new subscription, or null if it is not active
+     * @throws ModeConflictException if the event type is already registered with another mode
      */
     fun add(subscription: Subscription): Uuid? {
         val entry = ActiveSubscription(Uuid.random(), subscription)
         entry.lastHealthCheck = TimeSource.Monotonic.markNow()
         if (SubscriberClient.checkHealth(subscription.healthEndpoint)?.isActive != true) return null
+        Database.register(subscription.eventType, subscription.mode)
 
         lock.withLock {
             val replaced = active[subscription.eventType]

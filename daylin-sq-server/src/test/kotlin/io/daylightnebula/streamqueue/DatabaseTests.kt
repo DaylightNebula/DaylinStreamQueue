@@ -1,5 +1,6 @@
 package io.daylightnebula.streamqueue
 
+import io.daylightnebula.streamqueue.core.EventMode
 import org.junit.jupiter.api.Timeout
 import org.junit.jupiter.api.io.TempDir
 import org.rocksdb.ColumnFamilyDescriptor
@@ -51,8 +52,8 @@ class DatabaseTests {
         val families = listOf("default", "first", "second").map { ColumnFamilyDescriptor(it.encodeToByteArray()) }
         val options = DBOptions().setCreateIfMissing(true).setCreateMissingColumnFamilies(true)
         db = RocksDB.open(options, folder.toString(), families, handles)
-        first = Database.EventStore(db, handles[1])
-        second = Database.EventStore(db, handles[2])
+        first = Database.EventStore(db, handles[1], EventMode.Simple)
+        second = Database.EventStore(db, handles[2], EventMode.Simple)
     }
 
     @AfterTest
@@ -749,7 +750,7 @@ class DatabaseTests {
 
     @Test
     fun `database functions use the store with the given name`() {
-        Config.config = Config(events = emptyMap(), durations = notExpired)
+        Config.config = Config(durations = notExpired)
         Database.stores = mapOf("first" to first, "second" to second)
         val id = Uuid.random()
         val batch = List(2) { Uuid.random() to "message" }
@@ -769,21 +770,96 @@ class DatabaseTests {
     fun `database borrow uses the durations from the config`() {
         Database.stores = mapOf("first" to first)
         val id = first.pushOne()
-        Config.config = Config(events = emptyMap(), durations = notExpired)
+        Config.config = Config(durations = notExpired)
         assertEquals(id, Database.borrow("first")?.id)
         waitUntilExpired()
         assertNull(Database.borrow("first"))
 
-        Config.config = Config(events = emptyMap(), durations = expired)
+        Config.config = Config(durations = expired)
         assertEquals(id, Database.borrow("first")?.id)
     }
 
     @Test
     fun `database functions reject unknown events`() {
-        Config.config = Config(events = emptyMap(), durations = notExpired)
+        Config.config = Config(durations = notExpired)
         Database.stores = mapOf("first" to first)
 
         assertFailsWith<NoSuchElementException> { Database.push("unknown", Uuid.random(), "message") }
         assertFailsWith<NoSuchElementException> { Database.borrow("unknown") }
+    }
+
+    private fun openDatabase() {
+        db.close()
+        Database.open(folder.toString())
+        db = Database.db
+    }
+
+    @Test
+    fun `nothing is registered in a new database`() {
+        openDatabase()
+
+        assertTrue(Database.stores.isEmpty())
+    }
+
+    @Test
+    fun `a registered event type can be used and survives a restart`() {
+        Config.config = Config(durations = notExpired)
+        openDatabase()
+        Database.register("simple", EventMode.Simple)
+        Database.register("response", EventMode.Response)
+        val id = Uuid.random()
+        Database.push("simple", id, "hello")
+        openDatabase()
+
+        val modes = Database.stores.mapValues { it.value.mode }
+        assertEquals(mapOf("simple" to EventMode.Simple, "response" to EventMode.Response), modes)
+        assertEquals(id, Database.borrow("simple")?.id)
+    }
+
+    @Test
+    fun `an event type can only be registered again with the same mode`() {
+        openDatabase()
+        Database.register("simple", EventMode.Simple)
+        val store = Database.stores.getValue("simple")
+        Database.register("simple", EventMode.Simple)
+
+        assertFailsWith<ModeConflictException> { Database.register("simple", EventMode.Response) }
+        assertTrue(store === Database.stores.getValue("simple"))
+        openDatabase()
+        assertEquals(EventMode.Simple, Database.stores.getValue("simple").mode)
+    }
+
+    @Test
+    fun `events from before event types were registered are kept`() {
+        Config.config = Config(durations = notExpired)
+        val id = first.pushOne()
+        openDatabase()
+        assertTrue(Database.stores.isEmpty())
+
+        Database.register("first", EventMode.Response)
+
+        assertEquals(id, Database.borrow("first")?.id)
+    }
+
+    @Test
+    fun `names used by the database cannot be registered`() {
+        openDatabase()
+        listOf("daylin-sq-subscriptions", "daylin-sq-event-types").forEach {
+            assertTrue(Database.isReserved(it))
+            assertFailsWith<IllegalArgumentException> { Database.register(it, EventMode.Simple) }
+        }
+        assertFalse(Database.isReserved("first"))
+        assertTrue(Database.stores.isEmpty())
+    }
+
+    @Test
+    fun `registering at once makes one store`() {
+        openDatabase()
+        Executors.newFixedThreadPool(8).use { pool ->
+            val tasks = List(8) { Callable { Database.register("simple", EventMode.Simple) } }
+            pool.invokeAll(tasks).forEach { it.get() }
+        }
+
+        assertEquals(setOf("simple"), Database.stores.keys)
     }
 }

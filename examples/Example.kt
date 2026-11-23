@@ -1,4 +1,4 @@
-// Needs a server on port 5000 that uses daylin-sq-server/config.yml, and the com.daylin:daylin-sq-client-java dependency.
+// Needs a server on port 5000, and the com.daylin:daylin-sq-client-java dependency.
 
 import com.sun.net.httpserver.HttpExchange
 import com.sun.net.httpserver.HttpServer
@@ -20,7 +20,7 @@ private const val STREAM_PORT = 3244
 private const val CONTACT_PORT = 3245
 
 /**
- * Consumes and submits a simple event, then streams the alphabet from the consumer to the producer of a stream event.
+ * Consumes and submits a simple event, then streams the alphabet from the consumer to the producer of a response event.
  */
 fun main() {
     val client = StreamQueueClient("http://localhost:5000")

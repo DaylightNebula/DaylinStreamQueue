@@ -15,6 +15,17 @@ pub struct EventMessage {
     pub message: String
 }
 
+/// How the events of a type are handled.
+///
+/// Variants:
+/// * Simple: Events are only sent to a subscriber
+/// * Response: The subscriber must return a [`StreamEventResponse`] that is passed on to the producer
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EventMode {
+    Simple,
+    Response
+}
+
 /// What a subscriber's health endpoint responds with.
 ///
 /// Fields:
@@ -27,7 +38,7 @@ pub struct HealthResponse {
     pub accepting_events: bool
 }
 
-/// The body posted to the contact address of a producer once a subscriber has received its stream event.
+/// The body posted to the contact address of a producer once a subscriber has received its response event.
 ///
 /// Fields:
 /// * message: The event's message, exactly as it was submitted
@@ -41,7 +52,7 @@ pub struct StreamContact {
     pub extra_info: Option<String>
 }
 
-/// What a subscriber's event endpoint must respond with when the mode of the event is stream.
+/// What a subscriber's event endpoint must respond with when the mode of the event is response.
 ///
 /// Fields:
 /// * contact_address: How the producer may contact the subscriber while it processes the event
@@ -61,7 +72,8 @@ pub struct StreamEventResponse {
 ///
 /// Fields:
 /// * name: Not unique, just used for debugging
-/// * event_type: What event type this subscription is subscribing to
+/// * event_type: What event type this subscription is subscribing to, which is registered if it does not exist yet
+/// * mode: How the events are handled, must match the mode that the event type was registered with
 /// * health_endpoint: Url called with a GET for a [`HealthResponse`]
 /// * event_endpoint: Url called with a POST of an [`EventMessage`] for each event
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -69,6 +81,7 @@ pub struct StreamEventResponse {
 pub struct Subscription {
     pub name: String,
     pub event_type: String,
+    pub mode: EventMode,
     pub health_endpoint: String,
     pub event_endpoint: String
 }

@@ -2,6 +2,7 @@ package io.daylightnebula.streamqueue
 
 import com.sun.net.httpserver.HttpServer
 import io.daylightnebula.streamqueue.core.EventMessage
+import io.daylightnebula.streamqueue.core.EventMode
 import io.daylightnebula.streamqueue.core.HealthResponse
 import io.daylightnebula.streamqueue.core.StreamContact
 import io.daylightnebula.streamqueue.core.StreamEventResponse
@@ -9,16 +10,13 @@ import io.daylightnebula.streamqueue.core.Subscription
 import io.daylightnebula.streamqueue.core.streamQueueJson
 import org.junit.jupiter.api.Timeout
 import org.junit.jupiter.api.io.TempDir
-import org.rocksdb.ColumnFamilyDescriptor
-import org.rocksdb.ColumnFamilyHandle
-import org.rocksdb.DBOptions
 import org.rocksdb.RocksDB
-import org.rocksdb.WriteOptions
 import org.springframework.http.MediaType
 import org.springframework.test.web.servlet.ResultActionsDsl
 import org.springframework.test.web.servlet.post
 import org.springframework.test.web.servlet.setup.MockMvcBuilders
 import java.net.InetSocketAddress
+import java.nio.ByteBuffer
 import java.nio.file.Path
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.Executors
@@ -36,6 +34,7 @@ import kotlin.time.Duration.Companion.minutes
 import kotlin.time.Duration.Companion.seconds
 import kotlin.time.TimeSource
 import kotlin.uuid.Uuid
+import kotlin.uuid.putUuid
 
 /** Uses a temporary folder and fake subscribers for every test. */
 @Timeout(60)
@@ -58,23 +57,18 @@ class SubscriptionTests {
 
     @BeforeTest
     fun open() {
-        RocksDB.loadLibrary()
-        Database.writeOptions = WriteOptions()
-        val handles = mutableListOf<ColumnFamilyHandle>()
-        val families = listOf("default", "subscriptions", "first", "second")
-            .map { ColumnFamilyDescriptor(it.encodeToByteArray()) }
-        val options = DBOptions().setCreateIfMissing(true).setCreateMissingColumnFamilies(true)
-        db = RocksDB.open(options, folder.toString(), families, handles)
-        subscriptionStore = SubscriptionStore(db, handles[1])
-        first = Database.EventStore(db, handles[2])
-        Database.stores = mapOf("first" to first, "second" to Database.EventStore(db, handles[3]))
-        Config.config = Config(events = emptyMap(), durations = durations)
-        Subscriptions.init(subscriptionStore)
+        Config.config = Config(durations = durations)
+        Database.open(folder.toString())
+        db = Database.db
+        subscriptionStore = SubscriptionStore(db, Database.families.getValue("daylin-sq-subscriptions"))
+        Database.register("first", EventMode.Simple)
+        Database.register("second", EventMode.Simple)
+        first = Database.stores.getValue("first")
     }
 
     @AfterTest
     fun close() {
-        Dispatcher.start(emptySet())
+        Dispatcher.stop()
         subscribers.forEach { it.server.stop(0) }
         producers.forEach { it.server.stop(0) }
         db.close()
@@ -119,7 +113,13 @@ class SubscriptionTests {
         val address = "http://localhost:${server.address.port}"
 
         fun subscription(type: String = "first", name: String = "test") =
-            Subscription(name, type, "$address/health", "$address/event")
+            Subscription(
+                name = name,
+                eventType = type,
+                mode = Database.stores[type]?.mode ?: EventMode.Simple,
+                healthEndpoint = "$address/health",
+                eventEndpoint = "$address/event"
+            )
 
         fun subscribe(type: String = "first", name: String = "test"): Uuid =
             assertNotNull(Subscriptions.add(subscription(type, name)))
@@ -152,17 +152,20 @@ class SubscriptionTests {
 
     private fun producer() = Producer().also { producers += it }
 
-    /** A subscriber to the first event type, which becomes a stream, that responds with the given body. */
-    private fun streamSubscriber(body: String): Subscriber {
-        val events = mapOf("first" to Config.EventDescription(Config.Mode.Stream, emptyList()))
-        Config.config = Config(events = events, durations = durations)
+    /** A subscriber to the first event type, whose mode becomes response, that responds with the given body. */
+    private fun responseSubscriber(body: String): Subscriber {
+        if (first.mode != EventMode.Response) {
+            first = Database.EventStore(db, Database.families.getValue("first"), EventMode.Response)
+            Database.stores += "first" to first
+        }
         return subscriber().also {
             it.eventBody = body
             it.subscribe()
         }
     }
 
-    private fun streamSubscriber(response: StreamEventResponse) = streamSubscriber(streamQueueJson.encodeToString(response))
+    private fun responseSubscriber(response: StreamEventResponse) =
+        responseSubscriber(streamQueueJson.encodeToString(response))
 
     private fun post(subscription: String, type: String = "first"): ResultActionsDsl =
         mockMvc.post("/api/subscribe/$type") {
@@ -194,6 +197,56 @@ class SubscriptionTests {
 
         assertEquals(listOf(Uuid.parse(id)), ids())
         assertEquals(mapOf(Uuid.parse(id) to subscription), subscriptionStore.load())
+    }
+
+    @Test
+    fun `the first subscription to an event type registers it`() {
+        mockMvc.post("/api/submit-event/new") { content = "hello" }.andExpect { status { isNotFound() } }
+
+        post(subscriber().subscription("new").copy(mode = EventMode.Response)).andExpect { status { isOk() } }
+
+        assertEquals(EventMode.Response, Database.stores["new"]?.mode)
+        mockMvc.post("/api/submit-event/new") { content = "hello" }.andExpect { status { isOk() } }
+    }
+
+    @Test
+    fun `a rejected subscription does not register its event type`() {
+        val subscriber = subscriber().also { it.healthStatus = 500 }
+
+        post(subscriber.subscription("new")).andExpect { status { isUnprocessableContent() } }
+
+        assertNull(Database.stores["new"])
+    }
+
+    @Test
+    fun `a subscription with another mode than its event type is rejected`() {
+        post(subscriber().subscription().copy(mode = EventMode.Response)).andExpect { status { isConflict() } }
+
+        assertEquals(emptyList(), ids())
+        assertTrue(subscriptionStore.load().isEmpty())
+        assertEquals(EventMode.Simple, Database.stores["first"]?.mode)
+    }
+
+    @Test
+    fun `an event type registered while running is sent its events`() {
+        Dispatcher.start()
+        val subscriber = subscriber()
+        post(subscriber.subscription("new")).andExpect { status { isOk() } }
+
+        mockMvc.post("/api/submit-event/new") { content = "hello" }.andExpect { status { isOk() } }
+
+        waitFor("should be sent") { subscriber.messages() == listOf("hello") }
+    }
+
+    @Test
+    fun `saved subscriptions without a mode are removed`() {
+        val kept = subscriber().subscribe()
+        val old = ByteBuffer.allocate(16).putUuid(Uuid.random()).array()
+        val family = Database.families.getValue("daylin-sq-subscriptions")
+        db.put(family, old, """{"name":"a","eventType":"first","healthEndpoint":"b","eventEndpoint":"c"}""".encodeToByteArray())
+
+        assertEquals(setOf(kept), subscriptionStore.load().keys)
+        assertNull(db.get(family, old))
     }
 
     @Test
@@ -230,13 +283,18 @@ class SubscriptionTests {
         val valid = subscriber().subscription()
 
         post(valid, "second").andExpect { status { isBadRequest() } }
-        post(valid.copy(eventType = "unknown")).andExpect { status { isNotFound() } }
+        post(valid.copy(eventType = "daylin-sq-subscriptions")).andExpect { status { isBadRequest() } }
         listOf("", "not a url", "localhost", "ftp://localhost/health", "http://").forEach {
             post(valid.copy(healthEndpoint = it)).andExpect { status { isBadRequest() } }
             post(valid.copy(eventEndpoint = it)).andExpect { status { isBadRequest() } }
         }
         post("{}").andExpect { status { isBadRequest() } }
         post("not json").andExpect { status { isBadRequest() } }
+
+        // the mode is required and must be known
+        val json = streamQueueJson.encodeToString(valid)
+        post(json.replace(""""mode":"Simple",""", "")).andExpect { status { isBadRequest() } }
+        post(json.replace("Simple", "Stream")).andExpect { status { isBadRequest() } }
         assertEquals(emptyList(), ids())
     }
 
@@ -273,7 +331,7 @@ class SubscriptionTests {
 
     @Test
     fun `subscriptions that fail the timer check are removed`() {
-        Config.config = Config(events = emptyMap(), durations = alwaysDue)
+        Config.config = Config(durations = alwaysDue)
         val healthy = subscriber().subscribe()
         val inactive = subscriber().also { it.subscribe() }
         val failing = subscriber().also { it.subscribe() }
@@ -290,7 +348,7 @@ class SubscriptionTests {
 
     @Test
     fun `the timer makes one check for a shared health endpoint`() {
-        Config.config = Config(events = emptyMap(), durations = alwaysDue)
+        Config.config = Config(durations = alwaysDue)
         val subscriber = subscriber()
         subscriber.subscribe("first")
         subscriber.subscribe("second")
@@ -315,10 +373,10 @@ class SubscriptionTests {
         assertEquals(1, subscriber.healthChecks.get())
 
         // a shorter interval makes the subscribe check old enough, then its own check resets the timer
-        Config.config = Config(events = emptyMap(), durations = durations.copy(healthCheckInterval = 2_050.milliseconds))
+        Config.config = Config(durations = durations.copy(healthCheckInterval = 2_050.milliseconds))
         Subscriptions.checkDue()
         waitFor("should be checked") { subscriber.healthChecks.get() == 2 }
-        Config.config = Config(events = emptyMap(), durations = durations)
+        Config.config = Config(durations = durations)
         Subscriptions.checkDue()
         Thread.sleep(100)
         assertEquals(2, subscriber.healthChecks.get())
@@ -475,9 +533,9 @@ class SubscriptionTests {
     }
 
     @Test
-    fun `the producer of a stream event is told how to contact its subscriber`() {
+    fun `the producer of a response event is told how to contact its subscriber`() {
         val producer = producer()
-        val subscriber = streamSubscriber(StreamEventResponse("tcp://subscriber:1234", "héllo"))
+        val subscriber = responseSubscriber(StreamEventResponse("tcp://subscriber:1234", "héllo"))
         Database.push("first", Uuid.random(), "a \"日本\"", producer.address)
 
         Dispatcher.dispatch("first")
@@ -489,9 +547,9 @@ class SubscriptionTests {
     }
 
     @Test
-    fun `stream bodies use the documented field names`() {
+    fun `response bodies use the documented field names`() {
         val producer = producer()
-        streamSubscriber("""{"contactAddress":"address","extra-info":"info"}""")
+        responseSubscriber("""{"contactAddress":"address","extra-info":"info"}""")
         Database.push("first", Uuid.random(), "a", producer.address)
 
         Dispatcher.dispatch("first")
@@ -503,7 +561,7 @@ class SubscriptionTests {
     @Test
     fun `extra info is optional`() {
         val producer = producer()
-        streamSubscriber("""{"contactAddress":"address"}""")
+        responseSubscriber("""{"contactAddress":"address"}""")
         Database.push("first", Uuid.random(), "a", producer.address)
 
         Dispatcher.dispatch("first")
@@ -515,8 +573,8 @@ class SubscriptionTests {
     @Test
     fun `a submitted contact address is called`() {
         val producer = producer()
-        streamSubscriber(StreamEventResponse("address"))
-        Dispatcher.start(Database.stores.keys)
+        responseSubscriber(StreamEventResponse("address"))
+        Dispatcher.start()
 
         mockMvc.post("/api/submit-event/first") {
             content = "hello"
@@ -528,8 +586,8 @@ class SubscriptionTests {
     }
 
     @Test
-    fun `a stream event is received without a contact address`() {
-        val subscriber = streamSubscriber(StreamEventResponse("address"))
+    fun `a response event is received without a contact address`() {
+        val subscriber = responseSubscriber(StreamEventResponse("address"))
         push("a")
 
         Dispatcher.dispatch("first")
@@ -541,12 +599,12 @@ class SubscriptionTests {
     }
 
     @Test
-    fun `a stream event without a valid response is a failed event`() {
+    fun `a response event without a valid response is a failed event`() {
         val producer = producer()
         val bodies = listOf("", "not json", "{}", "[]", """{"extra-info":"info"}""", """{"contactAddress":null}""")
         Database.push("first", Uuid.random(), "a", producer.address)
         bodies.forEach { body ->
-            val subscriber = streamSubscriber(body)
+            val subscriber = responseSubscriber(body)
 
             Dispatcher.dispatch("first")
 
@@ -559,10 +617,10 @@ class SubscriptionTests {
     }
 
     @Test
-    fun `a failed stream event contacts its producer once it is received by another subscriber`() {
+    fun `a failed response event contacts its producer once it is received by another subscriber`() {
         val producer = producer()
-        val failing = streamSubscriber(StreamEventResponse("failing")).also { it.eventStatus = 500 }
-        streamSubscriber(StreamEventResponse("working"))
+        val failing = responseSubscriber(StreamEventResponse("failing")).also { it.eventStatus = 500 }
+        responseSubscriber(StreamEventResponse("working"))
         Database.push("first", Uuid.random(), "a", producer.address)
 
         Dispatcher.dispatch("first")
@@ -576,7 +634,7 @@ class SubscriptionTests {
     @Test
     fun `nothing happens when a producer does not accept its contact`() {
         val changes = listOf<Producer.() -> Unit>({ status = 500 }, { delay = 2_000 }, { server.stop(0) })
-        val subscriber = streamSubscriber(StreamEventResponse("address"))
+        val subscriber = responseSubscriber(StreamEventResponse("address"))
         changes.forEach { change ->
             val producer = producer().apply(change)
             Database.push("first", Uuid.random(), "a", producer.address)
@@ -616,7 +674,7 @@ class SubscriptionTests {
 
     @Test
     fun `submitting an event sends it`() {
-        Dispatcher.start(Database.stores.keys)
+        Dispatcher.start()
         val subscriber = subscriber().also { it.subscribe() }
 
         mockMvc.post("/api/submit-event/first") { content = "hello" }.andExpect { status { isOk() } }
@@ -626,7 +684,7 @@ class SubscriptionTests {
 
     @Test
     fun `a new subscriber is sent waiting events`() {
-        Dispatcher.start(Database.stores.keys)
+        Dispatcher.start()
         push("a", "b")
         val subscriber = subscriber()
 
@@ -637,7 +695,7 @@ class SubscriptionTests {
 
     @Test
     fun `completing an event sends the next one`() {
-        Dispatcher.start(Database.stores.keys)
+        Dispatcher.start()
         val subscriber = subscriber().also { it.subscribe() }
         push("a")
         Dispatcher.dispatch("first")
@@ -650,8 +708,8 @@ class SubscriptionTests {
 
     @Test
     fun `a timer check of a free subscriber sends waiting events of every type`() {
-        Config.config = Config(events = emptyMap(), durations = alwaysDue)
-        Dispatcher.start(Database.stores.keys)
+        Config.config = Config(durations = alwaysDue)
+        Dispatcher.start()
         val subscriber = subscriber()
         subscriber.subscribe("first")
         subscriber.subscribe("second")

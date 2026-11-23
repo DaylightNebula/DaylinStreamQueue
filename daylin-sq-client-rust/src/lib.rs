@@ -8,4 +8,4 @@ mod messages;
 
 pub use client::{StatusError, StreamQueueClient};
 pub use consumer::{StreamQueueConsumer, StreamQueueConsumerBuilder};
-pub use messages::{EventMessage, HealthResponse, StreamContact, StreamEventResponse, Subscription};
+pub use messages::{EventMessage, EventMode, HealthResponse, StreamContact, StreamEventResponse, Subscription};

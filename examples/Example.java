@@ -1,4 +1,4 @@
-// Needs a server on port 5000 that uses daylin-sq-server/config.yml, and the com.daylin:daylin-sq-client-java dependency.
+// Needs a server on port 5000, and the com.daylin:daylin-sq-client-java dependency.
 
 import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
@@ -20,7 +20,7 @@ import java.util.concurrent.TimeUnit;
 import kotlin.Unit;
 
 /**
- * Consumes and submits a simple event, then streams the alphabet from the consumer to the producer of a stream event.
+ * Consumes and submits a simple event, then streams the alphabet from the consumer to the producer of a response event.
  *
  * Fields:
  * <ul>
@@ -55,7 +55,7 @@ public class Example {
             0, // any free port
             port -> "http://localhost:" + port,
             1, // how many events to consume at once
-            null, // only used by stream events
+            null, // only used by response events
             event -> {
                 System.out.println("Received: " + event.getMessage());
                 handled.countDown();

@@ -1,6 +1,6 @@
-// Consumes and submits a simple event, then streams the alphabet from the consumer to the producer of a stream event.
+// Consumes and submits a simple event, then streams the alphabet from the consumer to the producer of a response event.
 //
-// Needs a server on port 5000 that uses daylin-sq-server/config.yml, and the daylin-sq-client-js package.
+// Needs a server on port 5000, and the daylin-sq-client-js package.
 
 import { createServer } from "node:http";
 import type { RequestListener, Server } from "node:http";

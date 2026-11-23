@@ -9,7 +9,8 @@ import kotlinx.serialization.Serializable
  * rejects the subscription unless it responds as active. Whether it is busy does not matter.
  *
  * @param name not unique, just used for debugging
- * @param eventType what event type this subscription is subscribing to
+ * @param eventType what event type this subscription is subscribing to, which is registered if it does not exist yet
+ * @param mode how the events are handled, must match the mode that the event type was registered with
  * @param healthEndpoint url called with a GET for a [HealthResponse]
  * @param eventEndpoint url called with a POST of an [EventMessage] for each event
  */
@@ -17,6 +18,7 @@ import kotlinx.serialization.Serializable
 data class Subscription(
     val name: String,
     val eventType: String,
+    val mode: EventMode,
     val healthEndpoint: String,
     val eventEndpoint: String
 )
